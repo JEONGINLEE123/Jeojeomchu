@@ -171,6 +171,159 @@ main {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* ===== Install Card (PWA install prompt) ===== */
+.install-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  background: linear-gradient(135deg, #ff8a5b 0%, #ff5a1f 100%);
+  color: white;
+  border-radius: var(--radius-lg);
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-md);
+  position: relative;
+  animation: fadeIn 0.3s ease;
+}
+
+.install-icon {
+  font-size: 30px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-md);
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.install-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.install-body h3 {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin-bottom: 2px;
+  color: white;
+}
+
+.install-body p {
+  font-size: 12.5px;
+  opacity: 0.92;
+  line-height: 1.4;
+  color: white;
+}
+
+.install-cta {
+  background: white;
+  color: #d24a18;
+  font-weight: 800;
+  padding: 10px 16px;
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  white-space: nowrap;
+  transition: transform 0.1s, background 0.15s;
+  flex-shrink: 0;
+}
+
+.install-cta:hover {
+  background: #fff6ef;
+}
+
+.install-cta:active {
+  transform: scale(0.96);
+}
+
+.install-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.22);
+  color: white;
+  border-radius: 50%;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.install-close:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+@media (max-width: 460px) {
+  .install-card {
+    flex-direction: column;
+    text-align: center;
+    padding: 22px 18px 18px;
+    gap: 12px;
+  }
+  .install-cta {
+    width: 100%;
+  }
+}
+
+/* ===== Install Steps (안내 모달) ===== */
+.install-intro {
+  font-size: 14px;
+  color: var(--text-soft);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.install-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.install-step {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 14px;
+  background: var(--surface-alt);
+  border-radius: var(--radius-md);
+}
+
+.install-step .step-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: white;
+  font-weight: 800;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.install-step .step-text {
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  padding-top: 2px;
+}
+
+.ios-share {
+  display: inline-block;
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
 /* ===== Mode Tabs (배달 / 요리) ===== */
 .mode-tabs {
   display: flex;
@@ -674,6 +827,130 @@ body.dark select {
 .ext-link .ext-icon {
   font-size: 20px;
 }
+
+/* ===== Big CTA (메인 주문 버튼) ===== */
+.big-cta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  background: linear-gradient(135deg, #03c75a 0%, #029f47 100%);
+  color: white;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  margin-bottom: 16px;
+  transition: transform 0.1s, box-shadow 0.15s;
+  box-shadow: var(--shadow-sm);
+}
+
+.big-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+  text-decoration: none;
+}
+
+.big-cta:active {
+  transform: translateY(0);
+}
+
+.big-cta-icon {
+  font-size: 30px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-sm);
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.big-cta-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.big-cta-text strong {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.big-cta-text span {
+  font-size: 12px;
+  opacity: 0.9;
+  font-weight: 500;
+}
+
+.big-cta-arrow {
+  font-size: 22px;
+  font-weight: 700;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
+.section-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin: 4px 0 10px;
+  text-align: center;
+}
+
+/* ===== 배달 앱 브랜드 버튼 ===== */
+.delivery-apps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.del-app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 8px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 0.1s, box-shadow 0.15s;
+  border: 1.5px solid transparent;
+}
+
+.del-app:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+  text-decoration: none;
+}
+
+.del-app-emoji {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.del-baemin {
+  background: #2AC1BC;
+  color: white;
+}
+
+.del-baemin:hover { background: #28b3ae; }
+
+.del-yogiyo {
+  background: #FA0050;
+  color: white;
+}
+
+.del-yogiyo:hover { background: #e10048; }
+
+.del-coupang {
+  background: #B49DDF;
+  color: white;
+}
+
+.del-coupang:hover { background: #a48cd2; }
 
 /* ===== Header actions ===== */
 .header-actions {

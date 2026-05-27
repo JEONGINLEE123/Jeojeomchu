@@ -31,6 +31,16 @@
   <main>
     <!-- 메뉴 선택 화면 -->
     <section id="picker-view" class="view active">
+      <div id="install-card" class="install-card hidden">
+        <div class="install-icon">📲</div>
+        <div class="install-body">
+          <h3>휴대폰 홈 화면에 추가</h3>
+          <p>한 번 탭으로 바로 실행 · 앱처럼 빠르게</p>
+        </div>
+        <button id="install-cta" class="install-cta">설치</button>
+        <button id="install-dismiss" class="install-close" aria-label="닫기">✕</button>
+      </div>
+
       <div class="mode-tabs" role="tablist">
         <button class="mode-tab active" data-mode="요리" role="tab">🍳 직접 요리</button>
         <button class="mode-tab" data-mode="배달" role="tab">🛵 배달</button>
@@ -44,6 +54,14 @@
         <button class="meal-tab" data-meal="저녁">
           <span class="emoji">🌙</span>
           <span>저녁</span>
+        </button>
+        <button class="meal-tab" data-meal="야식">
+          <span class="emoji">🌃</span>
+          <span>야식</span>
+        </button>
+        <button class="meal-tab" data-meal="디저트">
+          <span class="emoji">🍰</span>
+          <span>디저트</span>
         </button>
       </div>
 
@@ -123,6 +141,49 @@
     </section>
   </main>
 
+  <!-- 설치 안내 모달 (iOS / Desktop Safari 등) -->
+  <div id="install-modal" class="modal hidden">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>📲 홈 화면에 추가</h2>
+        <button class="icon-btn" id="close-install-modal" aria-label="닫기">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="install-intro" id="install-intro-text">설치 방법을 안내해드릴게요.</p>
+        <div class="install-steps" id="install-steps-ios">
+          <div class="install-step">
+            <div class="step-num">1</div>
+            <div class="step-text">Safari 하단의 <strong>공유 버튼</strong> <span class="ios-share">⬆️</span> 을 누르세요</div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">2</div>
+            <div class="step-text">메뉴에서 <strong>"홈 화면에 추가"</strong> 를 선택하세요</div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">3</div>
+            <div class="step-text">우측 상단 <strong>"추가"</strong> 를 누르면 완료!</div>
+          </div>
+        </div>
+        <div class="install-steps hidden" id="install-steps-android">
+          <div class="install-step">
+            <div class="step-num">1</div>
+            <div class="step-text">Chrome 우측 상단 <strong>⋮ 메뉴</strong>를 누르세요</div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">2</div>
+            <div class="step-text"><strong>"홈 화면에 추가"</strong> 또는 <strong>"앱 설치"</strong> 를 선택하세요</div>
+          </div>
+        </div>
+        <div class="install-steps hidden" id="install-steps-other">
+          <div class="install-step">
+            <div class="step-num">!</div>
+            <div class="step-text">이 브라우저에서는 홈 화면 설치를 지원하지 않을 수 있어요. <strong>Chrome</strong> 또는 <strong>Safari</strong> 에서 열어주세요.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 보관함 모달 -->
   <div id="library-modal" class="modal hidden">
     <div class="modal-content">
@@ -184,15 +245,6 @@
 
       <div class="modal-body">
         <div class="filter-group">
-          <h3>모델</h3>
-          <select id="model-select">
-            <option value="claude-haiku-4-5-20251001">Haiku 4.5 · 빠르고 저렴 (추천)</option>
-            <option value="claude-sonnet-4-6">Sonnet 4.6 · 균형</option>
-            <option value="claude-opus-4-7">Opus 4.7 · 가장 똑똑</option>
-          </select>
-        </div>
-
-        <div class="filter-group">
           <h3>테마</h3>
           <div class="seg-control" data-filter="theme">
             <button class="seg-btn" data-value="auto">자동</button>
@@ -238,10 +290,6 @@
         </div>
 
         <button id="save-settings" class="primary-btn">저장</button>
-
-        <p class="hint small">
-          💡 Anthropic API 키는 서버 환경변수에 보관되어 브라우저에 노출되지 않습니다.
-        </p>
       </div>
     </div>
   </div>

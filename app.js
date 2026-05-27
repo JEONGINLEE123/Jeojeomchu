@@ -20,7 +20,7 @@ const state = {
   time: '상관없음',
   ingredients: '',
   exclude: '',
-  model: localStorage.getItem('jjc_model') || 'claude-haiku-4-5-20251001',
+  model: 'claude-haiku-4-5-20251001',
   allergies: new Set(loadJSON('jjc_allergies', [])),
   diet: new Set(loadJSON('jjc_diet', [])),
   customAvoid: localStorage.getItem('jjc_custom_avoid') || '',
@@ -122,7 +122,6 @@ function showView(name) {
 
 // ===== Settings Modal =====
 function openSettings() {
-  $('#model-select').value = state.model;
   $('#custom-avoid').value = state.customAvoid;
   // Sync allergy/diet chips with state
   settingsModal.querySelectorAll('[data-filter="allergies"] .chip').forEach(c => {
@@ -145,11 +144,8 @@ settingsModal.addEventListener('click', (e) => {
 });
 
 $('#save-settings').addEventListener('click', () => {
-  const model = $('#model-select').value;
   const customAvoid = $('#custom-avoid').value.trim();
-  state.model = model;
   state.customAvoid = customAvoid;
-  localStorage.setItem('jjc_model', model);
   localStorage.setItem('jjc_custom_avoid', customAvoid);
   saveJSON('jjc_allergies', [...state.allergies]);
   saveJSON('jjc_diet', [...state.diet]);
@@ -632,6 +628,7 @@ function attachFavButton(rootEl, menu) {
 function showDeliveryDetail(menu) {
   showView('recipe');
   const content = $('#recipe-content');
+  const q = encodeURIComponent(menu.name);
   content.innerHTML = `
     <div class="recipe-header">
       <div class="menu-emoji">${escapeHtml(menu.emoji || '🍽️')}</div>
@@ -646,56 +643,72 @@ function showDeliveryDetail(menu) {
     </div>
 
     <div class="recipe-section">
-      <h3>🛵 주문하러 가기</h3>
-      ${deliveryLinksHTML(menu.name)}
+      <h3>🛵 주문하기</h3>
+      <a class="big-cta" href="https://map.naver.com/p/search/${q}" target="_blank" rel="noopener">
+        <span class="big-cta-icon">🗺️</span>
+        <div class="big-cta-text">
+          <strong>"${escapeHtml(menu.name)}" 근처 가게 찾기</strong>
+          <span>네이버 지도에서 주변 음식점 검색</span>
+        </div>
+        <span class="big-cta-arrow">→</span>
+      </a>
+
+      <p class="section-sub">또는 배달 앱에서 직접 검색</p>
+      <div class="delivery-apps">
+        <a class="del-app del-baemin" href="${baeminUrl(menu.name)}" target="_blank" rel="noopener">
+          <span class="del-app-emoji">🛵</span>
+          <span class="del-app-name">배달의민족</span>
+        </a>
+        <a class="del-app del-yogiyo" href="${yogiyoUrl(menu.name)}" target="_blank" rel="noopener">
+          <span class="del-app-emoji">🍔</span>
+          <span class="del-app-name">요기요</span>
+        </a>
+        <a class="del-app del-coupang" href="${coupangEatsUrl(menu.name)}" target="_blank" rel="noopener">
+          <span class="del-app-emoji">🥡</span>
+          <span class="del-app-name">쿠팡이츠</span>
+        </a>
+      </div>
     </div>
 
     <div class="recipe-section">
       <h3>🔍 더 알아보기</h3>
-      ${infoLinksHTML(menu.name)}
+      <div class="external-links">
+        <a class="ext-link" href="https://search.naver.com/search.naver?query=${encodeURIComponent(menu.name + ' 맛집 후기')}" target="_blank" rel="noopener">
+          <span class="ext-icon">🔍</span>
+          <span>네이버 검색</span>
+        </a>
+        <a class="ext-link" href="https://www.youtube.com/results?search_query=${encodeURIComponent(menu.name + ' 먹방')}" target="_blank" rel="noopener">
+          <span class="ext-icon">📺</span>
+          <span>YouTube</span>
+        </a>
+      </div>
     </div>
   `;
   attachFavButton(content, menu);
 }
 
-function deliveryLinksHTML(query) {
-  const q = encodeURIComponent(query);
-  return `
-    <div class="external-links">
-      <a class="ext-link" href="https://www.baemin.com/" target="_blank" rel="noopener">
-        <span class="ext-icon">🛵</span>
-        <span>배달의민족</span>
-      </a>
-      <a class="ext-link" href="https://www.yogiyo.co.kr/" target="_blank" rel="noopener">
-        <span class="ext-icon">🍔</span>
-        <span>요기요</span>
-      </a>
-      <a class="ext-link" href="https://www.coupangeats.com/" target="_blank" rel="noopener">
-        <span class="ext-icon">🥡</span>
-        <span>쿠팡이츠</span>
-      </a>
-      <a class="ext-link" href="https://map.naver.com/p/search/${q}" target="_blank" rel="noopener">
-        <span class="ext-icon">🗺️</span>
-        <span>네이버 지도</span>
-      </a>
-    </div>
-  `;
+// === Delivery app URL builders ===
+// Mobile: universal/custom-scheme links may open native app if installed; fallback to web.
+// Desktop: opens web homepage.
+function isMobile() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-function infoLinksHTML(query) {
-  const q = encodeURIComponent(query + ' 맛집 후기');
-  return `
-    <div class="external-links">
-      <a class="ext-link" href="https://search.naver.com/search.naver?query=${q}" target="_blank" rel="noopener">
-        <span class="ext-icon">🔍</span>
-        <span>네이버 검색</span>
-      </a>
-      <a class="ext-link" href="https://www.youtube.com/results?search_query=${encodeURIComponent(query + ' 먹방')}" target="_blank" rel="noopener">
-        <span class="ext-icon">📺</span>
-        <span>YouTube</span>
-      </a>
-    </div>
-  `;
+function baeminUrl(menu) {
+  // 배민은 공개 검색 URL이 없어 홈페이지로 연결 (모바일은 universal link로 앱 열림 가능)
+  return isMobile() ? 'https://baemin.me/' : 'https://www.baemin.com/';
+}
+
+function yogiyoUrl(menu) {
+  // 요기요 모바일 웹은 키워드 쿼리를 일부 지원
+  const q = encodeURIComponent(menu);
+  return isMobile()
+    ? `https://www.yogiyo.co.kr/mobile/#/?keyword=${q}`
+    : 'https://www.yogiyo.co.kr/';
+}
+
+function coupangEatsUrl(menu) {
+  return 'https://www.coupangeats.com/';
 }
 
 // ===== Recipe Flow =====
@@ -1183,9 +1196,101 @@ function renderShopping() {
   });
 }
 
+// ===== PWA Install (홈 화면에 추가) =====
+const installCard = $('#install-card');
+const installModal = $('#install-modal');
+let deferredInstallPrompt = null;
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+}
+
+function platformKind() {
+  const ua = navigator.userAgent;
+  if (/iPad|iPhone|iPod/.test(ua) && !window.MSStream) return 'ios';
+  if (/Android/.test(ua)) return 'android';
+  return 'desktop';
+}
+
+function isInstallDismissed() {
+  return localStorage.getItem('jjc_install_dismissed') === '1';
+}
+
+function maybeShowInstallCard() {
+  if (isStandalone()) {
+    installCard.classList.add('hidden');
+    return;
+  }
+  if (isInstallDismissed()) return;
+
+  const cta = $('#install-cta');
+  const kind = platformKind();
+
+  if (deferredInstallPrompt) {
+    cta.textContent = '📥 설치';
+    cta.onclick = triggerNativeInstall;
+    installCard.classList.remove('hidden');
+  } else if (kind === 'ios') {
+    cta.textContent = '설치 방법 보기';
+    cta.onclick = () => openInstallModal('ios');
+    installCard.classList.remove('hidden');
+  } else if (kind === 'android') {
+    // Android Chrome may fire beforeinstallprompt later; if not, give instructions
+    cta.textContent = '설치 방법 보기';
+    cta.onclick = () => openInstallModal('android');
+    installCard.classList.remove('hidden');
+  }
+  // desktop without prompt → don't show (uncommon use case)
+}
+
+async function triggerNativeInstall() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  if (outcome === 'accepted') {
+    installCard.classList.add('hidden');
+  }
+}
+
+function openInstallModal(kind) {
+  ['ios', 'android', 'other'].forEach(k => {
+    $('#install-steps-' + k).classList.toggle('hidden', k !== kind);
+  });
+  installModal.classList.remove('hidden');
+}
+
+function closeInstallModal() {
+  installModal.classList.add('hidden');
+}
+
+$('#close-install-modal').addEventListener('click', closeInstallModal);
+installModal.addEventListener('click', (e) => {
+  if (e.target === installModal) closeInstallModal();
+});
+
+$('#install-dismiss').addEventListener('click', () => {
+  localStorage.setItem('jjc_install_dismissed', '1');
+  installCard.classList.add('hidden');
+});
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  maybeShowInstallCard();
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  installCard.classList.add('hidden');
+  toast('설치 완료! 홈 화면에서 열어보세요.', 'success', 2500);
+});
+
 // ===== Init =====
 applyTheme(state.theme);
 applyMode(state.mode);
+maybeShowInstallCard();
 
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
