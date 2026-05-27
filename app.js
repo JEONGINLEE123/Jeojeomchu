@@ -20,7 +20,7 @@ const state = {
   time: '상관없음',
   ingredients: '',
   exclude: '',
-  apiKey: localStorage.getItem('jjc_api_key') || '',
+  password: localStorage.getItem('jjc_password') || '',
   model: localStorage.getItem('jjc_model') || 'claude-haiku-4-5-20251001',
   allergies: new Set(loadJSON('jjc_allergies', [])),
   diet: new Set(loadJSON('jjc_diet', [])),
@@ -124,7 +124,7 @@ function showView(name) {
 
 // ===== Settings Modal =====
 function openSettings() {
-  $('#api-key').value = state.apiKey;
+  $('#password').value = state.password;
   $('#model-select').value = state.model;
   $('#custom-avoid').value = state.customAvoid;
   // Sync allergy/diet chips with state
@@ -149,28 +149,48 @@ settingsModal.addEventListener('click', (e) => {
 });
 
 $('#toggle-key').addEventListener('click', () => {
-  const input = $('#api-key');
+  const input = $('#password');
   input.type = input.type === 'password' ? 'text' : 'password';
 });
 
-$('#save-settings').addEventListener('click', () => {
-  const key = $('#api-key').value.trim();
+$('#save-settings').addEventListener('click', async () => {
+  const pwd = $('#password').value.trim();
   const model = $('#model-select').value;
   const customAvoid = $('#custom-avoid').value.trim();
-  state.apiKey = key;
+
+  // Verify password against server before saving
+  if (pwd && pwd !== state.password) {
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: pwd }),
+      });
+      if (!res.ok) {
+        toast('비밀번호가 올바르지 않아요.', 'error');
+        return;
+      }
+    } catch (err) {
+      toast('서버에 연결할 수 없어요.', 'error');
+      return;
+    }
+  }
+
+  state.password = pwd;
   state.model = model;
   state.customAvoid = customAvoid;
-  localStorage.setItem('jjc_api_key', key);
+  localStorage.setItem('jjc_password', pwd);
   localStorage.setItem('jjc_model', model);
   localStorage.setItem('jjc_custom_avoid', customAvoid);
   saveJSON('jjc_allergies', [...state.allergies]);
   saveJSON('jjc_diet', [...state.diet]);
   updateApiWarning();
   closeSettings();
+  if (pwd) toast('저장 완료', 'success', 1500);
 });
 
 function updateApiWarning() {
-  if (state.apiKey) {
+  if (state.password) {
     apiWarning.classList.add('hidden');
   } else {
     apiWarning.classList.remove('hidden');
@@ -253,24 +273,21 @@ function updateBackLabel() {
   btn.textContent = detailOrigin === 'library' ? '← 처음으로' : '← 추천 목록';
 }
 
-// ===== Claude API =====
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
+// ===== Claude API (via backend proxy) =====
+const CHAT_ENDPOINT = '/api/chat';
 
 async function callClaude(systemPrompt, userContent, maxTokens = 1500, onChunk = null) {
-  if (!state.apiKey) {
-    throw new Error('NO_API_KEY');
+  if (!state.password) {
+    throw new Error('NO_PASSWORD');
   }
 
   const useStream = typeof onChunk === 'function';
 
-  const res = await fetch(ANTHROPIC_API, {
+  const res = await fetch(CHAT_ENDPOINT, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': state.apiKey,
-      'anthropic-version': ANTHROPIC_VERSION,
-      'anthropic-dangerous-direct-browser-access': 'true',
+      'x-app-password': state.password,
     },
     body: JSON.stringify({
       model: state.model,
@@ -288,6 +305,9 @@ async function callClaude(systemPrompt, userContent, maxTokens = 1500, onChunk =
   });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error('INVALID_PASSWORD');
+    }
     const errBody = await res.text();
     let errMsg = errBody;
     try {
@@ -444,7 +464,7 @@ function extractJSON(text) {
 let excludedFromReroll = []; // menus already shown across reroll cycles
 
 async function runRecommendation({ isReroll = false } = {}) {
-  if (!state.apiKey) {
+  if (!state.password) {
     updateApiWarning();
     openSettings();
     return;
@@ -580,11 +600,12 @@ function handleError(err) {
 
 function humanizeError(err) {
   const msg = err.message || String(err);
-  if (msg.startsWith('API_ERROR:401')) return 'API 키가 올바르지 않아요. 설정에서 확인해주세요.';
+  if (msg === 'INVALID_PASSWORD') return '비밀번호가 올바르지 않아요. 설정에서 확인해주세요.';
+  if (msg === 'NO_PASSWORD') return '앱 비밀번호를 먼저 입력해주세요.';
   if (msg.startsWith('API_ERROR:429')) return 'API 호출 한도를 초과했어요. 잠시 후 다시 시도해주세요.';
+  if (msg.startsWith('API_ERROR:502')) return '서버에 연결할 수 없어요. 잠시 후 다시 시도해주세요.';
   if (msg.startsWith('API_ERROR:')) return msg.replace(/^API_ERROR:\d+:/, 'API 오류: ');
   if (msg.startsWith('PARSE_ERROR') || msg.startsWith('FORMAT_ERROR')) return '응답을 해석하지 못했어요. 다시 시도해주세요.';
-  if (msg === 'NO_API_KEY') return 'API 키를 먼저 등록해주세요.';
   if (msg === 'NO_INGREDIENTS') return '사진에서 재료를 찾지 못했어요.';
   return '문제가 생겼어요. 다시 시도해주세요.';
 }
@@ -972,7 +993,7 @@ $('#photo-btn').addEventListener('click', () => $('#photo-input').click());
 $('#photo-input').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  if (!state.apiKey) {
+  if (!state.password) {
     openSettings();
     e.target.value = '';
     return;

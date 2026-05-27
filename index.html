@@ -105,7 +105,7 @@
       </button>
 
       <p id="api-warning" class="hidden warning">
-        ⚠️ Claude API 키를 먼저 등록해주세요.
+        🔒 앱 비밀번호를 먼저 입력해주세요.
         <button class="link-btn" id="open-settings">설정 열기</button>
       </p>
     </section>
@@ -189,16 +189,13 @@
 
       <div class="modal-body">
         <div class="filter-group">
-          <h3>Claude API 키</h3>
+          <h3>앱 비밀번호</h3>
           <p class="hint">
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">
-              console.anthropic.com
-            </a>
-            에서 발급받을 수 있어요. 키는 브라우저에만 저장됩니다.
+            앱 관리자에게 받은 비밀번호를 입력하세요. 비밀번호는 이 기기에만 저장됩니다.
           </p>
           <div class="input-row">
-            <input type="password" id="api-key" placeholder="sk-ant-..." autocomplete="off" />
-            <button id="toggle-key" class="icon-btn" aria-label="키 보이기">👁️</button>
+            <input type="password" id="password" placeholder="비밀번호" autocomplete="current-password" />
+            <button id="toggle-key" class="icon-btn" aria-label="비밀번호 보이기">👁️</button>
           </div>
         </div>
 
@@ -259,7 +256,7 @@
         <button id="save-settings" class="primary-btn">저장</button>
 
         <p class="hint small">
-          💡 키는 이 기기의 localStorage에만 저장돼요. 서버로 전송되지 않습니다.
+          💡 비밀번호는 이 기기에만 저장돼요. Anthropic API 키는 서버 환경변수에 보관되어 브라우저에 노출되지 않습니다.
         </p>
       </div>
     </div>
