@@ -68,6 +68,7 @@ const state = {
   customAvoid: localStorage.getItem('jjc_custom_avoid') || '',
   favorites: loadJSON('jjc_favorites', []),
   recent: loadJSON('jjc_recent', []),
+  dislikes: loadJSON('jjc_dislikes', []),
   shopping: loadJSON('jjc_shopping', []),
   theme: localStorage.getItem('jjc_theme') || 'auto', // 'auto' | 'light' | 'dark'
   lastRecommendations: null,
@@ -141,6 +142,40 @@ function refreshFavButtons(menuName) {
     btn.classList.toggle('active', fav);
     btn.textContent = fav ? '★' : '☆';
     btn.setAttribute('aria-label', fav ? '즐겨찾기 해제' : '즐겨찾기 추가');
+  });
+}
+
+// ===== Dislikes (negative feedback for personalization) =====
+const DISLIKES_MAX = 40;
+
+function isDisliked(menuName) {
+  return state.dislikes.some(d => d.name === menuName);
+}
+
+function toggleDislike(menu) {
+  const idx = state.dislikes.findIndex(d => d.name === menu.name);
+  if (idx >= 0) {
+    state.dislikes.splice(idx, 1);
+  } else {
+    state.dislikes.unshift({ name: menu.name, dislikedAt: Date.now() });
+    if (state.dislikes.length > DISLIKES_MAX) state.dislikes.length = DISLIKES_MAX;
+    // If disliked, drop from favorites (mutually exclusive)
+    const favIdx = state.favorites.findIndex(f => f.name === menu.name);
+    if (favIdx >= 0) {
+      state.favorites.splice(favIdx, 1);
+      saveJSON('jjc_favorites', state.favorites);
+      refreshFavButtons(menu.name);
+    }
+  }
+  saveJSON('jjc_dislikes', state.dislikes);
+  refreshDislikeButtons(menu.name);
+}
+
+function refreshDislikeButtons(menuName) {
+  document.querySelectorAll(`.dislike-btn[data-menu="${CSS.escape(menuName)}"]`).forEach(btn => {
+    const disliked = isDisliked(menuName);
+    btn.classList.toggle('active', disliked);
+    btn.setAttribute('aria-label', disliked ? '별로였어요 취소' : '별로였어요');
   });
 }
 
@@ -364,8 +399,31 @@ function buildRecommendationPrompt(excludeNames = []) {
   if (moods.length) parts.push(`기분/스타일: ${moods.join(', ')}`);
   if (state.exclude) parts.push(`피하고 싶은 것: ${state.exclude}`);
   parts.push(...buildRestrictionLines());
+
+  // === Personalization signals ===
+  // Recently viewed (last 7 days, max 8) — avoid repetition
+  const RECENT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const recentNames = state.recent
+    .filter(r => now - (r.viewedAt || 0) < RECENT_LOOKBACK_MS)
+    .slice(0, 8)
+    .map(r => r.name);
+  if (recentNames.length) {
+    parts.push(`최근 본 메뉴(반복 피하기): ${recentNames.join(', ')}`);
+  }
+  // Favorites — taste signal (top 5)
+  const favoriteNames = state.favorites.slice(0, 5).map(f => f.name);
+  if (favoriteNames.length) {
+    parts.push(`즐겨찾기(취향 참고): ${favoriteNames.join(', ')}`);
+  }
+  // Dislikes — hard avoid
+  const dislikedNames = state.dislikes.map(d => d.name);
+  if (dislikedNames.length) {
+    parts.push(`별로였다고 한 메뉴(추천 금지): ${dislikedNames.join(', ')}`);
+  }
+
   if (excludeNames.length) {
-    parts.push(`이미 본 메뉴(제외할 것): ${excludeNames.join(', ')}`);
+    parts.push(`이미 이번 세션에서 본 메뉴(제외할 것): ${excludeNames.join(', ')}`);
   }
 
   return parts.join('\n');
@@ -378,6 +436,9 @@ const RECOMMENDATION_SYSTEM = `당신은 한국에서 매일 끼니를 고민하
 규칙:
 - 한국인 입맛에 맞는, 실제로 자주 먹는 현실적인 메뉴를 추천하세요.
 - 너무 비슷한 메뉴 3개를 추천하지 말고, 결이 다른 옵션을 섞으세요.
+- "최근 본 메뉴"가 주어지면 그 메뉴들과 결이 다른 옵션을 우선 추천하세요 (똑같은 거 또 추천 금지).
+- "즐겨찾기"가 주어지면 그 메뉴들의 결(매콤/담백/고기/면 등)을 참고해서 비슷한 결의 다른 메뉴도 1개 정도 섞으세요.
+- "별로였다고 한 메뉴(추천 금지)"가 주어지면 그 메뉴들은 절대 추천하지 말고, 비슷한 메뉴도 가능하면 피하세요.
 - 식사 형태가 "배달 주문"이면 한국 배달앱(배민/요기요/쿠팡이츠)에서 흔히 시킬 수 있는 메뉴 위주로 추천하세요 (예: 치킨, 피자, 족발/보쌈, 중식, 분식, 도시락, 돈까스, 회/초밥, 떡볶이 세트 등). 가정에서만 먹는 반찬류는 피하세요.
 - 식사 형태가 "직접 요리"면 가정에서 만들 수 있는 메뉴를 추천하고, 보유 재료가 있으면 그 재료를 활용할 수 있는 메뉴를 우선하세요.
 - 식사 시간이 "야식"이면 가볍거나 자극적인 야식류를 추천하세요 (예: 라면, 떡볶이, 곱창, 닭발, 족발, 마른안주, 야식 토스트 등). 무거운 정찬은 피하세요.
@@ -561,6 +622,65 @@ function tryExtractRecommendations(partial) {
 
 recommendBtn.addEventListener('click', () => runRecommendation({ isReroll: false }));
 $('#reroll-btn').addEventListener('click', () => runRecommendation({ isReroll: true }));
+$('#roulette-btn').addEventListener('click', spinRoulette);
+
+// ===== Roulette / Decision Mode =====
+let rouletteSpinning = false;
+
+function spinRoulette() {
+  if (rouletteSpinning) return;
+  const cards = Array.from(document.querySelectorAll('#menu-cards .menu-card:not(.skeleton-card)'));
+  if (cards.length < 2) {
+    toast('룰렛은 메뉴 2개 이상부터 돌릴 수 있어요', 'info', 1800);
+    return;
+  }
+
+  rouletteSpinning = true;
+  const rouletteBtn = $('#roulette-btn');
+  const rerollBtn = $('#reroll-btn');
+  rouletteBtn.disabled = true;
+  rerollBtn.disabled = true;
+  cards.forEach(c => c.classList.add('roulette-running'));
+
+  // Land on a random card; decelerate so the ending feels weighted not abrupt.
+  const winnerIdx = Math.floor(Math.random() * cards.length);
+  const totalSteps = cards.length * 4 + winnerIdx + 1; // enough cycles to feel "spun"
+  let step = 0;
+  let lastIdx = -1;
+
+  function tick() {
+    if (lastIdx >= 0) cards[lastIdx].classList.remove('roulette-highlight');
+    const idx = step % cards.length;
+    cards[idx].classList.add('roulette-highlight');
+    lastIdx = idx;
+    step++;
+
+    if (step > totalSteps) {
+      finishRoulette(cards, winnerIdx);
+      return;
+    }
+    // Ease-out: interval grows from 80ms to ~450ms
+    const progress = step / totalSteps;
+    const interval = 80 + Math.pow(progress, 2.2) * 380;
+    setTimeout(tick, interval);
+  }
+  tick();
+}
+
+function finishRoulette(cards, winnerIdx) {
+  cards.forEach(c => c.classList.remove('roulette-running', 'roulette-highlight'));
+  const winner = cards[winnerIdx];
+  winner.classList.add('roulette-winner');
+  winner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  $('#roulette-btn').disabled = false;
+  $('#reroll-btn').disabled = false;
+  rouletteSpinning = false;
+
+  // Brief celebration toast → tap card or auto-open after delay
+  const menuName = winner.querySelector('h3')?.textContent || '이거';
+  toast(`🎉 "${menuName}"으로 결정! 카드를 누르면 바로 시작해요`, 'success', 4000);
+}
 
 function setLoading(loading, isReroll = false) {
   const btn = isReroll ? $('#reroll-btn') : recommendBtn;
@@ -608,6 +728,7 @@ function renderRecommendations(items, partial = false) {
     card.className = 'menu-card has-photo';
     card.style.animation = 'fadeIn 0.25s ease';
     const fav = isFavorite(item.name);
+    const disliked = isDisliked(item.name);
     card.innerHTML = `
       <div class="menu-photo">
         <span class="menu-photo-emoji">${escapeHtml(item.emoji || '🍽️')}</span>
@@ -620,9 +741,22 @@ function renderRecommendations(items, partial = false) {
         <div class="menu-meta">
           ${(item.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
+        <div class="menu-feedback">
+          <button class="dislike-btn ${disliked ? 'active' : ''}" data-menu="${escapeHtml(item.name)}"
+            aria-label="${disliked ? '별로였어요 취소' : '별로였어요'}">
+            <span class="dislike-icon">👎</span>
+            <span class="dislike-label">${disliked ? '별로였어요 (취소)' : '이런 거 말고'}</span>
+          </button>
+        </div>
       </div>
     `;
     card.addEventListener('click', (e) => {
+      if (e.target.closest('.dislike-btn')) {
+        e.stopPropagation();
+        toggleDislike(item);
+        toast(isDisliked(item.name) ? '다음엔 이런 거 피할게요' : '취소했어요', 'info', 1800);
+        return;
+      }
       if (e.target.closest('.fav-btn')) {
         e.stopPropagation();
         toggleFavorite(item);
@@ -676,6 +810,136 @@ function attachFavButton(rootEl, menu) {
   }
 }
 
+// ===== Nearby restaurants (Kakao Local via backend) =====
+// When the server returns 503 once, stop offering the feature for the rest of the session.
+let localApiDisabled = false;
+
+async function getCurrentPosition() {
+  if (!navigator.geolocation) throw new Error('NO_GEOLOCATION');
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      err => reject(err),
+      { timeout: 8000, maximumAge: 60_000, enableHighAccuracy: false }
+    );
+  });
+}
+
+async function findNearbyRestaurants(query) {
+  if (localApiDisabled) {
+    toast('주변 검색이 아직 설정되지 않았어요', 'info', 2400);
+    return;
+  }
+  const listEl = $('#nearby-list');
+  const btnEl = document.querySelector('[data-action="find-nearby"]');
+  if (!listEl) return;
+
+  // Loading state
+  listEl.innerHTML = `
+    <div class="nearby-loading">
+      <span class="btn-spinner"></span>
+      <span>위치 확인하고 주변 가게 찾는 중...</span>
+    </div>
+  `;
+  if (btnEl) btnEl.disabled = true;
+
+  try {
+    const { lat, lng } = await getCurrentPosition();
+    const url = `/api/local?q=${encodeURIComponent(query)}&lat=${lat}&lng=${lng}`;
+    const res = await fetch(url);
+    if (res.status === 503) {
+      localApiDisabled = true;
+      listEl.innerHTML = `<div class="nearby-empty">주변 검색이 설정되지 않았어요. 위 "네이버 지도에서 검색"을 이용해주세요.</div>`;
+      return;
+    }
+    if (!res.ok) throw new Error('API_ERROR');
+    const data = await res.json();
+    const places = data.places || [];
+    renderNearbyList(listEl, places, query);
+  } catch (err) {
+    console.error(err);
+    if (err.code === 1) {
+      // PERMISSION_DENIED
+      listEl.innerHTML = `<div class="nearby-empty">위치 권한이 거부됐어요. 브라우저 설정에서 허용 후 다시 시도해주세요.</div>`;
+    } else if (err.code === 3 || err.message === 'NO_GEOLOCATION') {
+      listEl.innerHTML = `<div class="nearby-empty">위치를 확인할 수 없어요. 네이버 지도 링크를 이용해주세요.</div>`;
+    } else {
+      listEl.innerHTML = `<div class="nearby-empty">주변 가게를 불러오지 못했어요. 잠시 후 다시 시도해주세요.</div>`;
+    }
+  } finally {
+    if (btnEl) btnEl.disabled = false;
+  }
+}
+
+function renderNearbyList(listEl, places, query) {
+  if (!places.length) {
+    listEl.innerHTML = `<div class="nearby-empty">반경 2km 안에 "${escapeHtml(query)}" 가게가 없어요.</div>`;
+    return;
+  }
+  listEl.innerHTML = places.map(p => {
+    const distance = p.distance != null
+      ? (p.distance < 1000 ? `${p.distance}m` : `${(p.distance / 1000).toFixed(1)}km`)
+      : '';
+    const category = p.category ? p.category.split('>').pop().trim() : '';
+    return `
+      <a class="nearby-item" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">
+        <div class="nearby-info">
+          <div class="nearby-name">${escapeHtml(p.name)}</div>
+          <div class="nearby-meta">
+            ${category ? `<span>${escapeHtml(category)}</span>` : ''}
+            ${distance ? `<span>· ${distance}</span>` : ''}
+          </div>
+          <div class="nearby-address">${escapeHtml(p.address || '')}</div>
+        </div>
+        <span class="nearby-arrow">→</span>
+      </a>
+    `;
+  }).join('');
+}
+
+// ===== Share =====
+function shareMenuHTML() {
+  return `<button class="share-btn" data-action="share" aria-label="공유하기">
+    <span>📤</span><span>공유</span>
+  </button>`;
+}
+
+async function shareMenu(menu, kind /* 'recipe' | 'delivery' */) {
+  const emoji = menu.emoji || '🍽️';
+  const name = menu.name || '';
+  const desc = menu.description || '';
+  const verb = kind === 'recipe' ? '오늘 이거 만들어볼까?' : '오늘 이거 어때?';
+  const text = `${emoji} ${name}\n${desc ? desc + '\n' : ''}\n${verb} (저점추 추천)`;
+  const url = location.origin || location.href;
+
+  // Prefer native share (mobile → KakaoTalk/messages); fall back to clipboard.
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: `${emoji} ${name}`, text, url });
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return; // user dismissed
+      // Fall through to clipboard
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(`${text}\n${url}`);
+    toast('공유 내용을 복사했어요. 붙여넣기 해주세요', 'success', 2400);
+  } catch {
+    toast('공유를 지원하지 않는 환경이에요', 'error', 2400);
+  }
+}
+
+function attachShareButton(rootEl, menu, kind) {
+  const btn = rootEl.querySelector('[data-action="share"]');
+  if (btn) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      shareMenu(menu, kind);
+    });
+  }
+}
+
 function showDeliveryDetail(menu) {
   showView('recipe');
   const content = $('#recipe-content');
@@ -691,8 +955,24 @@ function showDeliveryDetail(menu) {
         <div class="menu-meta" style="margin-top:8px;">
           ${(menu.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
+        <div class="header-actions-row">
+          ${shareMenuHTML()}
+        </div>
       </div>
       ${favButtonHTML(menu.name)}
+    </div>
+
+    <div class="recipe-section">
+      <h3>📍 내 주변에서 찾기</h3>
+      <button type="button" class="big-cta" data-action="find-nearby">
+        <span class="big-cta-icon">📍</span>
+        <div class="big-cta-text">
+          <strong>내 위치 기준으로 "${escapeHtml(menu.name)}" 검색</strong>
+          <span>위치 권한이 필요해요 · Kakao Local</span>
+        </div>
+        <span class="big-cta-arrow">→</span>
+      </button>
+      <div class="nearby-list" id="nearby-list"></div>
     </div>
 
     <div class="recipe-section">
@@ -738,7 +1018,14 @@ function showDeliveryDetail(menu) {
     </div>
   `;
   attachFavButton(content, menu);
+  attachShareButton(content, menu, 'delivery');
   applyHeroPhoto(content, menu);
+
+  // Wire "내 주변에서 찾기"
+  const nearbyBtn = content.querySelector('[data-action="find-nearby"]');
+  if (nearbyBtn) {
+    nearbyBtn.addEventListener('click', () => findNearbyRestaurants(menu.name));
+  }
 
   // Wire delivery app buttons (scheme + web fallback)
   content.querySelectorAll('.del-app[data-app]').forEach(btn => {
@@ -871,6 +1158,9 @@ function renderRecipe(recipe, menu) {
         <div class="menu-meta" style="margin-top:8px;">
           ${recipe.totalTime ? `<span class="tag">⏱️ ${escapeHtml(recipe.totalTime)}</span>` : ''}
         </div>
+        <div class="header-actions-row">
+          ${shareMenuHTML()}
+        </div>
       </div>
       ${favButtonHTML(name)}
     </div>
@@ -923,6 +1213,7 @@ function renderRecipe(recipe, menu) {
     imageQuery: menu.imageQuery,
   };
   attachFavButton(content, menuToSave);
+  attachShareButton(content, menuToSave, 'recipe');
   applyHeroPhoto(content, menuToSave);
 
   // Wire servings selector

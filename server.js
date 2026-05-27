@@ -7,6 +7,8 @@ const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_VERSION = '2023-06-01';
 // Optional. If unset, /api/image returns 503 and the client falls back to emoji cards.
 const UNSPLASH_KEY = process.env.UNSPLASH_ACCESS_KEY;
+// Optional. If unset, /api/local returns 503 and the client hides the "내 주변" feature.
+const KAKAO_KEY = process.env.KAKAO_REST_API_KEY;
 
 if (!ANTHROPIC_KEY) {
   console.error('[FATAL] ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.');
@@ -15,6 +17,10 @@ if (!ANTHROPIC_KEY) {
 
 if (!UNSPLASH_KEY) {
   console.warn('[INFO] UNSPLASH_ACCESS_KEY 미설정 — 메뉴 사진 없이 이모지 카드로 표시됩니다.');
+}
+
+if (!KAKAO_KEY) {
+  console.warn('[INFO] KAKAO_REST_API_KEY 미설정 — 내 주변 맛집 기능이 비활성화됩니다.');
 }
 
 const app = express();
@@ -96,6 +102,55 @@ app.get('/api/image', async (req, res) => {
     res.json({ url: imgUrl });
   } catch (err) {
     console.error('[IMAGE ERROR]', err);
+    res.status(502).json({ error: { message: err.message } });
+  }
+});
+
+// Kakao Local — keyword search around a user's lat/lng
+app.get('/api/local', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const radius = Math.min(parseInt(req.query.radius || '2000', 10) || 2000, 20000);
+
+  if (!q) return res.status(400).json({ error: { message: 'query required' } });
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ error: { message: 'lat/lng required' } });
+  }
+  if (!KAKAO_KEY) {
+    return res.status(503).json({ error: { message: 'kakao local not configured' } });
+  }
+
+  try {
+    const url = new URL('https://dapi.kakao.com/v2/local/search/keyword.json');
+    url.searchParams.set('query', q);
+    url.searchParams.set('x', String(lng)); // Kakao expects longitude as x
+    url.searchParams.set('y', String(lat));
+    url.searchParams.set('radius', String(radius));
+    url.searchParams.set('sort', 'distance');
+    url.searchParams.set('size', '10');
+    url.searchParams.set('category_group_code', 'FD6'); // 음식점만
+
+    const upstream = await fetch(url, {
+      headers: { 'Authorization': `KakaoAK ${KAKAO_KEY}` },
+    });
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ error: { message: 'kakao error' } });
+    }
+    const data = await upstream.json();
+    const places = (data.documents || []).map(d => ({
+      name: d.place_name,
+      address: d.road_address_name || d.address_name,
+      category: d.category_name,
+      phone: d.phone,
+      distance: d.distance ? parseInt(d.distance, 10) : null, // meters
+      url: d.place_url,
+      lat: parseFloat(d.y),
+      lng: parseFloat(d.x),
+    }));
+    res.json({ places });
+  } catch (err) {
+    console.error('[LOCAL ERROR]', err);
     res.status(502).json({ error: { message: err.message } });
   }
 });
