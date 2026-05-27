@@ -1,0 +1,16 @@
+{
+  "name": "jeojeomchu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI가 추천하는 점심·저녁 메뉴와 레시피 (PWA)",
+  "scripts": {
+    "start": "serve --no-clipboard --no-port-switching",
+    "dev": "python -m http.server 8000"
+  },
+  "dependencies": {
+    "serve": "^14.2.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

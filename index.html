@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#ff6b35" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="저점추" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="style.css" />
+  <title>저점추 · 오늘 뭐 먹지?</title>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">🍚</span>
+      <div>
+        <h1>저점추</h1>
+        <p class="tagline">저녁 점심 추천 · AI가 골라줘요</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="library-btn" class="icon-btn" aria-label="보관함">📚</button>
+      <button id="settings-btn" class="icon-btn" aria-label="설정">⚙️</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 메뉴 선택 화면 -->
+    <section id="picker-view" class="view active">
+      <div class="mode-tabs" role="tablist">
+        <button class="mode-tab active" data-mode="요리" role="tab">🍳 직접 요리</button>
+        <button class="mode-tab" data-mode="배달" role="tab">🛵 배달</button>
+      </div>
+
+      <div class="meal-tabs">
+        <button class="meal-tab active" data-meal="점심">
+          <span class="emoji">☀️</span>
+          <span>점심</span>
+        </button>
+        <button class="meal-tab" data-meal="저녁">
+          <span class="emoji">🌙</span>
+          <span>저녁</span>
+        </button>
+      </div>
+
+      <div class="filter-group">
+        <h3>오늘 기분은?</h3>
+        <div class="chip-row" data-filter="mood">
+          <button class="chip" data-value="가벼운">🥗 가벼운</button>
+          <button class="chip" data-value="든든한">🍖 든든한</button>
+          <button class="chip" data-value="매콤한">🌶️ 매콤한</button>
+          <button class="chip" data-value="시원한">🧊 시원한</button>
+          <button class="chip" data-value="따뜻한">🍲 따뜻한</button>
+          <button class="chip" data-value="달달한">🍰 달달한</button>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <h3>어떤 종류?</h3>
+        <div class="chip-row single" data-filter="cuisine">
+          <button class="chip active" data-value="상관없음">상관없음</button>
+          <button class="chip" data-value="한식">한식</button>
+          <button class="chip" data-value="양식">양식</button>
+          <button class="chip" data-value="중식">중식</button>
+          <button class="chip" data-value="일식">일식</button>
+          <button class="chip" data-value="분식">분식</button>
+          <button class="chip" data-value="아시안">아시안</button>
+        </div>
+      </div>
+
+      <div class="filter-group cook-only">
+        <h3>조리 시간</h3>
+        <div class="chip-row single" data-filter="time">
+          <button class="chip active" data-value="상관없음">상관없음</button>
+          <button class="chip" data-value="10분 이내">⏱️ 10분</button>
+          <button class="chip" data-value="30분 이내">⏱️ 30분</button>
+          <button class="chip" data-value="1시간 이내">⏱️ 1시간</button>
+        </div>
+      </div>
+
+      <div class="filter-group cook-only">
+        <h3>냉장고에 있는 재료 <span class="optional">(선택)</span></h3>
+        <textarea id="ingredients" placeholder="예: 양파, 계란, 김치, 두부..." rows="2"></textarea>
+        <div class="photo-input-wrap">
+          <button type="button" class="photo-btn" id="photo-btn">
+            📷 사진으로 재료 인식하기
+          </button>
+          <input type="file" id="photo-input" accept="image/*" capture="environment" hidden />
+          <div id="photo-preview" class="photo-preview hidden"></div>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <h3>피하고 싶은 것 <span class="optional">(선택)</span></h3>
+        <input type="text" id="exclude" placeholder="예: 해산물, 매운 거..." />
+      </div>
+
+      <button id="recommend-btn" class="primary-btn">
+        <span class="btn-text">메뉴 추천받기</span>
+        <span class="btn-spinner hidden"></span>
+      </button>
+
+      <p id="api-warning" class="hidden warning">
+        ⚠️ Claude API 키를 먼저 등록해주세요.
+        <button class="link-btn" id="open-settings">설정 열기</button>
+      </p>
+    </section>
+
+    <!-- 결과 화면 -->
+    <section id="result-view" class="view">
+      <button class="back-btn" id="back-to-picker">← 다시 고르기</button>
+      <h2 id="result-title">오늘의 추천</h2>
+      <div id="menu-cards"></div>
+      <button id="reroll-btn" class="reroll-btn">
+        <span class="btn-text">🎲 다른 메뉴 추천받기</span>
+        <span class="btn-spinner hidden"></span>
+      </button>
+    </section>
+
+    <!-- 레시피 상세 화면 -->
+    <section id="recipe-view" class="view">
+      <button class="back-btn" id="back-to-result">← 추천 목록</button>
+      <div id="recipe-content"></div>
+    </section>
+  </main>
+
+  <!-- 보관함 모달 -->
+  <div id="library-modal" class="modal hidden">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>보관함</h2>
+        <button class="icon-btn" id="close-library" aria-label="닫기">✕</button>
+      </header>
+
+      <div class="library-tabs">
+        <button class="lib-tab active" data-tab="favorites">⭐ 즐겨찾기</button>
+        <button class="lib-tab" data-tab="recent">🕐 최근</button>
+        <button class="lib-tab" data-tab="shopping">🛒 장보기</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="lib-panel active" data-panel="favorites">
+          <div id="favorites-list" class="lib-list"></div>
+          <p class="empty-state hidden" id="favorites-empty">
+            아직 즐겨찾기한 메뉴가 없어요.<br/>
+            추천 카드의 ☆ 버튼을 눌러보세요.
+          </p>
+        </div>
+
+        <div class="lib-panel" data-panel="recent">
+          <div id="recent-list" class="lib-list"></div>
+          <p class="empty-state hidden" id="recent-empty">
+            아직 본 메뉴가 없어요.
+          </p>
+        </div>
+
+        <div class="lib-panel" data-panel="shopping">
+          <div class="shopping-controls">
+            <div class="input-row">
+              <input type="text" id="shopping-add-input" placeholder="직접 추가: 예) 양파 1개" />
+              <button class="icon-btn" id="shopping-add-btn" aria-label="추가">＋</button>
+            </div>
+          </div>
+          <div id="shopping-list" class="shopping-list"></div>
+          <p class="empty-state hidden" id="shopping-empty">
+            장보기 리스트가 비어있어요.<br/>
+            레시피 화면에서 "장보기로 만들기"를 눌러보세요.
+          </p>
+          <div class="shopping-actions hidden" id="shopping-actions">
+            <button class="secondary-btn" id="clear-checked">✓ 체크한 것만 지우기</button>
+            <button class="danger-btn" id="clear-all-shopping">🗑️ 전체 비우기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 설정 모달 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <header class="modal-header">
+        <h2>설정</h2>
+        <button class="icon-btn" id="close-settings" aria-label="닫기">✕</button>
+      </header>
+
+      <div class="modal-body">
+        <div class="filter-group">
+          <h3>Claude API 키</h3>
+          <p class="hint">
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">
+              console.anthropic.com
+            </a>
+            에서 발급받을 수 있어요. 키는 브라우저에만 저장됩니다.
+          </p>
+          <div class="input-row">
+            <input type="password" id="api-key" placeholder="sk-ant-..." autocomplete="off" />
+            <button id="toggle-key" class="icon-btn" aria-label="키 보이기">👁️</button>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <h3>모델</h3>
+          <select id="model-select">
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5 · 빠르고 저렴 (추천)</option>
+            <option value="claude-sonnet-4-6">Sonnet 4.6 · 균형</option>
+            <option value="claude-opus-4-7">Opus 4.7 · 가장 똑똑</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <h3>테마</h3>
+          <div class="seg-control" data-filter="theme">
+            <button class="seg-btn" data-value="auto">자동</button>
+            <button class="seg-btn" data-value="light">☀️ 라이트</button>
+            <button class="seg-btn" data-value="dark">🌙 다크</button>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="filter-group">
+          <h3>알레르기</h3>
+          <p class="hint">선택하면 모든 추천에 자동 반영돼요.</p>
+          <div class="chip-row" data-filter="allergies">
+            <button class="chip" data-value="견과류">🥜 견과류</button>
+            <button class="chip" data-value="갑각류">🦐 갑각류</button>
+            <button class="chip" data-value="우유">🥛 우유</button>
+            <button class="chip" data-value="계란">🥚 계란</button>
+            <button class="chip" data-value="밀(글루텐)">🌾 밀(글루텐)</button>
+            <button class="chip" data-value="콩(대두)">🫘 콩</button>
+            <button class="chip" data-value="복숭아">🍑 복숭아</button>
+            <button class="chip" data-value="토마토">🍅 토마토</button>
+            <button class="chip" data-value="돼지고기">🐖 돼지고기</button>
+            <button class="chip" data-value="고등어">🐟 고등어</button>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <h3>식이제한</h3>
+          <div class="chip-row" data-filter="diet">
+            <button class="chip" data-value="비건">🌱 비건</button>
+            <button class="chip" data-value="채식">🥗 채식</button>
+            <button class="chip" data-value="글루텐 프리">🚫🌾 글루텐 프리</button>
+            <button class="chip" data-value="할랄">🕌 할랄</button>
+            <button class="chip" data-value="저염">🧂 저염</button>
+            <button class="chip" data-value="다이어트">⚖️ 다이어트</button>
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <h3>그 외 피하고 싶은 것 <span class="optional">(선택)</span></h3>
+          <input type="text" id="custom-avoid" placeholder="예: 오이, 향신료 강한 거..." />
+        </div>
+
+        <button id="save-settings" class="primary-btn">저장</button>
+
+        <p class="hint small">
+          💡 키는 이 기기의 localStorage에만 저장돼요. 서버로 전송되지 않습니다.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
