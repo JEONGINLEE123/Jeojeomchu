@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "jeojeomchu",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "port": 3000,
+      "env": {
+        "ANTHROPIC_API_KEY": "placeholder-for-static-preview"
+      }
+    }
+  ]
+}

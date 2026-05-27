@@ -11,6 +11,48 @@ function saveJSON(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+// ===== Image fetch (Unsplash via backend) =====
+// In-session cache so we don't refetch the same query across re-renders.
+const imageUrlCache = new Map();
+// When the server returns 503 once, stop hitting /api/image for the rest of the session.
+let imageApiDisabled = false;
+
+async function fetchMenuImage(query) {
+  if (!query || imageApiDisabled) return null;
+  if (imageUrlCache.has(query)) return imageUrlCache.get(query);
+  try {
+    const res = await fetch(`/api/image?q=${encodeURIComponent(query)}`);
+    if (res.status === 503) {
+      imageApiDisabled = true;
+      return null;
+    }
+    if (!res.ok) return null;
+    const data = await res.json();
+    const url = data.url || null;
+    imageUrlCache.set(query, url);
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function applyMenuPhoto(rootEl, menu) {
+  const query = menu.imageQuery || menu.name;
+  if (!query) return;
+  const photoEl = rootEl.querySelector('.menu-photo');
+  if (!photoEl) return;
+  fetchMenuImage(query).then(url => {
+    if (!url || !photoEl.isConnected) return;
+    const img = new Image();
+    img.onload = () => {
+      if (!photoEl.isConnected) return;
+      photoEl.style.backgroundImage = `url("${url}")`;
+      photoEl.classList.add('has-image');
+    };
+    img.src = url;
+  });
+}
+
 // ===== State =====
 const state = {
   mode: '요리', // '요리' or '배달'
@@ -69,6 +111,7 @@ function toggleFavorite(menu) {
       description: menu.description,
       tags: menu.tags || [],
       mode: state.mode,
+      imageQuery: menu.imageQuery,
       addedAt: Date.now(),
     });
   }
@@ -85,6 +128,7 @@ function addRecent(menu) {
     description: menu.description,
     tags: menu.tags || [],
     mode: state.mode,
+    imageQuery: menu.imageQuery,
     viewedAt: Date.now(),
   });
   if (state.recent.length > 20) state.recent.length = 20;
@@ -336,10 +380,13 @@ const RECOMMENDATION_SYSTEM = `당신은 한국에서 매일 끼니를 고민하
 - 너무 비슷한 메뉴 3개를 추천하지 말고, 결이 다른 옵션을 섞으세요.
 - 식사 형태가 "배달 주문"이면 한국 배달앱(배민/요기요/쿠팡이츠)에서 흔히 시킬 수 있는 메뉴 위주로 추천하세요 (예: 치킨, 피자, 족발/보쌈, 중식, 분식, 도시락, 돈까스, 회/초밥, 떡볶이 세트 등). 가정에서만 먹는 반찬류는 피하세요.
 - 식사 형태가 "직접 요리"면 가정에서 만들 수 있는 메뉴를 추천하고, 보유 재료가 있으면 그 재료를 활용할 수 있는 메뉴를 우선하세요.
+- 식사 시간이 "야식"이면 가볍거나 자극적인 야식류를 추천하세요 (예: 라면, 떡볶이, 곱창, 닭발, 족발, 마른안주, 야식 토스트 등). 무거운 정찬은 피하세요.
+- 식사 시간이 "디저트"면 디저트/간식류를 추천하세요. 배달이면 케이크, 빙수, 마카롱, 도넛, 와플, 크로플 등. 요리면 홈베이킹 가능한 디저트 (예: 호떡, 떡, 푸딩, 쿠키, 노오븐 케이크, 약과, 단팥죽 등).
 - 메뉴 이름은 한국에서 흔히 부르는 이름으로 (예: "김치찌개", "알리오 올리오 파스타", "양념치킨").
 - description은 1문장, 왜 이 메뉴를 추천하는지 친근하게.
 - emoji는 음식을 잘 표현하는 단일 이모지 1개.
 - tags는 ["#매콤", "#10분컷", "#원팬"] 같이 짧은 태그 2~4개.
+- imageQuery는 이 음식을 사진 검색하기 위한 **영문 키워드** 1~3단어 (예: "kimchi stew", "tteokbokki", "korean fried chicken", "bingsu"). 한식이면 메뉴의 영문 표기, 양식이면 일반 영어 명칭. Unsplash 같은 사진 검색에 잘 걸리도록 단순하게.
 
 출력은 반드시 다음 JSON 형식으로만 응답하세요. JSON 외 다른 텍스트는 절대 포함하지 마세요:
 
@@ -349,7 +396,8 @@ const RECOMMENDATION_SYSTEM = `당신은 한국에서 매일 끼니를 고민하
       "name": "메뉴 이름",
       "emoji": "🍜",
       "description": "추천 이유 한 줄",
-      "tags": ["#태그1", "#태그2"]
+      "tags": ["#태그1", "#태그2"],
+      "imageQuery": "kimchi stew"
     }
   ]
 }`;
@@ -458,10 +506,10 @@ function renderSkeletonCards(count = 3) {
   container.innerHTML = '';
   for (let i = 0; i < count; i++) {
     const sk = document.createElement('div');
-    sk.className = 'menu-card skeleton-card';
+    sk.className = 'menu-card skeleton-card has-photo';
     sk.innerHTML = `
-      <div class="skeleton" style="width:56px;height:56px;border-radius:var(--radius-md);flex-shrink:0"></div>
-      <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div class="skeleton" style="width:100%;height:160px;border-radius:0"></div>
+      <div style="padding:16px 18px;display:flex;flex-direction:column;gap:8px">
         <div class="skeleton" style="height:18px;width:60%"></div>
         <div class="skeleton" style="height:14px;width:90%"></div>
         <div class="skeleton" style="height:12px;width:40%"></div>
@@ -557,11 +605,15 @@ function renderRecommendations(items, partial = false) {
 
   items.forEach((item, idx) => {
     const card = document.createElement('div');
-    card.className = 'menu-card';
+    card.className = 'menu-card has-photo';
     card.style.animation = 'fadeIn 0.25s ease';
     const fav = isFavorite(item.name);
     card.innerHTML = `
-      <div class="menu-emoji">${escapeHtml(item.emoji || '🍽️')}</div>
+      <div class="menu-photo">
+        <span class="menu-photo-emoji">${escapeHtml(item.emoji || '🍽️')}</span>
+        <button class="fav-btn ${fav ? 'active' : ''}" data-menu="${escapeHtml(item.name)}"
+          aria-label="${fav ? '즐겨찾기 해제' : '즐겨찾기 추가'}">${fav ? '★' : '☆'}</button>
+      </div>
       <div class="menu-info">
         <h3>${escapeHtml(item.name)}</h3>
         <p>${escapeHtml(item.description || '')}</p>
@@ -569,8 +621,6 @@ function renderRecommendations(items, partial = false) {
           ${(item.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
         </div>
       </div>
-      <button class="fav-btn ${fav ? 'active' : ''}" data-menu="${escapeHtml(item.name)}"
-        aria-label="${fav ? '즐겨찾기 해제' : '즐겨찾기 추가'}">${fav ? '★' : '☆'}</button>
     `;
     card.addEventListener('click', (e) => {
       if (e.target.closest('.fav-btn')) {
@@ -588,6 +638,7 @@ function renderRecommendations(items, partial = false) {
       }
     });
     container.appendChild(card);
+    applyMenuPhoto(card, item);
   });
 
   // Pad with skeletons while still streaming
@@ -595,10 +646,10 @@ function renderRecommendations(items, partial = false) {
     const remaining = Math.max(0, 3 - items.length);
     for (let i = 0; i < remaining; i++) {
       const sk = document.createElement('div');
-      sk.className = 'menu-card skeleton-card';
+      sk.className = 'menu-card skeleton-card has-photo';
       sk.innerHTML = `
-        <div class="skeleton" style="width:56px;height:56px;border-radius:var(--radius-md);flex-shrink:0"></div>
-        <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+        <div class="skeleton" style="width:100%;height:160px;border-radius:0"></div>
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:8px">
           <div class="skeleton" style="height:18px;width:60%"></div>
           <div class="skeleton" style="height:14px;width:90%"></div>
         </div>
@@ -630,8 +681,10 @@ function showDeliveryDetail(menu) {
   const content = $('#recipe-content');
   const q = encodeURIComponent(menu.name);
   content.innerHTML = `
+    <div class="recipe-hero">
+      <span class="recipe-hero-emoji">${escapeHtml(menu.emoji || '🍽️')}</span>
+    </div>
     <div class="recipe-header">
-      <div class="menu-emoji">${escapeHtml(menu.emoji || '🍽️')}</div>
       <div>
         <h2>${escapeHtml(menu.name)}</h2>
         <p class="desc">${escapeHtml(menu.description || '')}</p>
@@ -653,20 +706,20 @@ function showDeliveryDetail(menu) {
         <span class="big-cta-arrow">→</span>
       </a>
 
-      <p class="section-sub">또는 배달 앱에서 직접 검색</p>
+      <p class="section-sub">또는 배달 앱 바로 열기</p>
       <div class="delivery-apps">
-        <a class="del-app del-baemin" href="${baeminUrl(menu.name)}" target="_blank" rel="noopener">
+        <button type="button" class="del-app del-baemin" data-app="baemin">
           <span class="del-app-emoji">🛵</span>
           <span class="del-app-name">배달의민족</span>
-        </a>
-        <a class="del-app del-yogiyo" href="${yogiyoUrl(menu.name)}" target="_blank" rel="noopener">
+        </button>
+        <button type="button" class="del-app del-yogiyo" data-app="yogiyo">
           <span class="del-app-emoji">🍔</span>
           <span class="del-app-name">요기요</span>
-        </a>
-        <a class="del-app del-coupang" href="${coupangEatsUrl(menu.name)}" target="_blank" rel="noopener">
+        </button>
+        <button type="button" class="del-app del-coupang" data-app="coupang">
           <span class="del-app-emoji">🥡</span>
           <span class="del-app-name">쿠팡이츠</span>
-        </a>
+        </button>
       </div>
     </div>
 
@@ -685,30 +738,74 @@ function showDeliveryDetail(menu) {
     </div>
   `;
   attachFavButton(content, menu);
+  applyHeroPhoto(content, menu);
+
+  // Wire delivery app buttons (scheme + web fallback)
+  content.querySelectorAll('.del-app[data-app]').forEach(btn => {
+    btn.addEventListener('click', () => openDeliveryApp(btn.dataset.app));
+  });
 }
 
-// === Delivery app URL builders ===
-// Mobile: universal/custom-scheme links may open native app if installed; fallback to web.
-// Desktop: opens web homepage.
+// Loads photo into a .recipe-hero block. Same lazy/fallback semantics as menu cards.
+function applyHeroPhoto(rootEl, menu) {
+  const query = menu.imageQuery || menu.name;
+  if (!query) return;
+  const heroEl = rootEl.querySelector('.recipe-hero');
+  if (!heroEl) return;
+  fetchMenuImage(query).then(url => {
+    if (!url || !heroEl.isConnected) return;
+    const img = new Image();
+    img.onload = () => {
+      if (!heroEl.isConnected) return;
+      heroEl.style.backgroundImage = `url("${url}")`;
+      heroEl.classList.add('has-image');
+    };
+    img.src = url;
+  });
+}
+
+// === Delivery apps: custom scheme + web fallback ===
 function isMobile() {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-function baeminUrl(menu) {
-  // 배민은 공개 검색 URL이 없어 홈페이지로 연결 (모바일은 universal link로 앱 열림 가능)
-  return isMobile() ? 'https://baemin.me/' : 'https://www.baemin.com/';
-}
+const DELIVERY_APPS = {
+  baemin:  { scheme: 'baemin://',      web: 'https://www.baemin.com/',       name: '배달의민족' },
+  yogiyo:  { scheme: 'yogiyo://',      web: 'https://www.yogiyo.co.kr/',     name: '요기요' },
+  coupang: { scheme: 'coupangeats://', web: 'https://www.coupangeats.com/',  name: '쿠팡이츠' },
+};
 
-function yogiyoUrl(menu) {
-  // 요기요 모바일 웹은 키워드 쿼리를 일부 지원
-  const q = encodeURIComponent(menu);
-  return isMobile()
-    ? `https://www.yogiyo.co.kr/mobile/#/?keyword=${q}`
-    : 'https://www.yogiyo.co.kr/';
-}
+// On mobile, try opening the native app. If it doesn't open within ~1.5s
+// (tab stays visible), fall back to the web URL. On desktop, just open web.
+function openDeliveryApp(appKey) {
+  const app = DELIVERY_APPS[appKey];
+  if (!app) return;
 
-function coupangEatsUrl(menu) {
-  return 'https://www.coupangeats.com/';
+  if (!isMobile()) {
+    window.open(app.web, '_blank', 'noopener');
+    return;
+  }
+
+  let pageHidden = false;
+  const onVis = () => { if (document.hidden) pageHidden = true; };
+  document.addEventListener('visibilitychange', onVis);
+
+  const fallback = setTimeout(() => {
+    document.removeEventListener('visibilitychange', onVis);
+    if (!pageHidden) {
+      window.location.href = app.web;
+    }
+  }, 1500);
+
+  // Trigger the native app via custom scheme
+  window.location.href = app.scheme;
+
+  // Clear fallback if user comes back quickly (i.e. app cancelled / dialog dismissed)
+  window.addEventListener('pageshow', function once() {
+    clearTimeout(fallback);
+    document.removeEventListener('visibilitychange', onVis);
+    window.removeEventListener('pageshow', once);
+  });
 }
 
 // ===== Recipe Flow =====
@@ -721,8 +818,10 @@ async function loadRecipe(menu, idx, servings = 1) {
   showView('recipe');
   const content = $('#recipe-content');
   content.innerHTML = `
+    <div class="recipe-hero">
+      <span class="recipe-hero-emoji">${escapeHtml(menu.emoji || '🍽️')}</span>
+    </div>
     <div class="recipe-header">
-      <div class="menu-emoji">${escapeHtml(menu.emoji || '🍽️')}</div>
       <div>
         <h2>${escapeHtml(menu.name)}</h2>
         <p class="desc">레시피 생성 중...</p>
@@ -731,6 +830,7 @@ async function loadRecipe(menu, idx, servings = 1) {
     <div class="skeleton" style="height: 120px; margin-bottom: 16px;"></div>
     <div class="skeleton" style="height: 200px;"></div>
   `;
+  applyHeroPhoto(content, menu);
 
   try {
     const restrictions = buildRestrictionLines();
@@ -741,8 +841,10 @@ async function loadRecipe(menu, idx, servings = 1) {
     renderRecipe(recipe, menu);
   } catch (err) {
     content.innerHTML = `
+      <div class="recipe-hero">
+        <span class="recipe-hero-emoji">${escapeHtml(menu.emoji || '🍽️')}</span>
+      </div>
       <div class="recipe-header">
-        <div class="menu-emoji">${escapeHtml(menu.emoji || '🍽️')}</div>
         <div>
           <h2>${escapeHtml(menu.name)}</h2>
         </div>
@@ -759,8 +861,10 @@ function renderRecipe(recipe, menu) {
   const name = recipe.name || menu.name;
 
   content.innerHTML = `
+    <div class="recipe-hero">
+      <span class="recipe-hero-emoji">${escapeHtml(emoji)}</span>
+    </div>
     <div class="recipe-header">
-      <div class="menu-emoji">${escapeHtml(emoji)}</div>
       <div>
         <h2>${escapeHtml(name)}</h2>
         <p class="desc">${escapeHtml(recipe.description || '')}</p>
@@ -811,8 +915,15 @@ function renderRecipe(recipe, menu) {
       ${externalLinksHTML(name)}
     </div>
   `;
-  const menuToSave = { name, emoji, description: recipe.description || menu.description, tags: menu.tags || [] };
+  const menuToSave = {
+    name,
+    emoji,
+    description: recipe.description || menu.description,
+    tags: menu.tags || [],
+    imageQuery: menu.imageQuery,
+  };
   attachFavButton(content, menuToSave);
+  applyHeroPhoto(content, menuToSave);
 
   // Wire servings selector
   content.querySelectorAll('[data-filter="servings"] .seg-btn').forEach(b => {
@@ -1120,13 +1231,30 @@ function buildLibItem(item, opts) {
   el.className = 'lib-item';
   const modeLabel = item.mode === '배달' ? '🛵 배달' : '🍳 요리';
   el.innerHTML = `
-    <div class="menu-emoji">${escapeHtml(item.emoji || '🍽️')}</div>
+    <div class="lib-thumb">
+      <span class="lib-thumb-emoji">${escapeHtml(item.emoji || '🍽️')}</span>
+    </div>
     <div class="lib-info">
       <h4>${escapeHtml(item.name)}</h4>
       <div class="meta">${modeLabel} · ${escapeHtml(item.description || '')}</div>
     </div>
     ${opts.canRemove ? `<button class="lib-remove" aria-label="삭제">✕</button>` : ''}
   `;
+  // Lazy-load thumbnail
+  const thumb = el.querySelector('.lib-thumb');
+  const query = item.imageQuery || item.name;
+  if (query && thumb) {
+    fetchMenuImage(query).then(url => {
+      if (!url || !thumb.isConnected) return;
+      const img = new Image();
+      img.onload = () => {
+        if (!thumb.isConnected) return;
+        thumb.style.backgroundImage = `url("${url}")`;
+        thumb.classList.add('has-image');
+      };
+      img.src = url;
+    });
+  }
   el.addEventListener('click', (e) => {
     if (e.target.closest('.lib-remove')) {
       e.stopPropagation();

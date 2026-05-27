@@ -358,27 +358,33 @@ body.mode-delivery .cook-only {
 /* ===== Meal Tabs ===== */
 .meal-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
   margin-bottom: 28px;
+}
+
+@media (max-width: 520px) {
+  .meal-tabs {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .meal-tab {
   background: var(--surface);
   border: 2px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 18px;
+  padding: 14px 8px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   font-weight: 600;
-  font-size: 15px;
+  font-size: 14px;
   transition: all 0.15s;
 }
 
 .meal-tab .emoji {
-  font-size: 28px;
+  font-size: 24px;
 }
 
 .meal-tab.active {
@@ -632,6 +638,58 @@ body.dark select {
   box-shadow: none;
 }
 
+/* Photo card layout: hero photo on top, info beneath */
+.menu-card.has-photo {
+  padding: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  overflow: hidden;
+}
+
+.menu-card.has-photo .menu-info {
+  padding: 14px 18px 18px;
+}
+
+.menu-photo {
+  position: relative;
+  width: 100%;
+  height: 170px;
+  background-color: var(--surface-alt);
+  background-image: linear-gradient(135deg, var(--primary-light) 0%, var(--surface-alt) 100%);
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.menu-photo-emoji {
+  font-size: 64px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.15));
+  transition: opacity 0.2s ease;
+}
+
+.menu-photo.has-image .menu-photo-emoji {
+  opacity: 0;
+}
+
+.menu-photo::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 60%, rgba(0, 0, 0, 0.18) 100%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.menu-photo.has-image::after {
+  opacity: 1;
+}
+
 .menu-card .menu-emoji {
   font-size: 36px;
   line-height: 1;
@@ -685,6 +743,47 @@ body.dark select {
   border-radius: var(--radius-lg);
   padding: 24px;
   border: 1.5px solid var(--border);
+  overflow: hidden;
+}
+
+/* Hero photo breaks out of #recipe-content's padding to be full-width */
+.recipe-hero {
+  position: relative;
+  height: 220px;
+  margin: -24px -24px 20px;
+  background-color: var(--surface-alt);
+  background-image: linear-gradient(135deg, var(--primary-light) 0%, var(--surface-alt) 100%);
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.recipe-hero-emoji {
+  font-size: 88px;
+  line-height: 1;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.18));
+  transition: opacity 0.2s ease;
+}
+
+.recipe-hero.has-image .recipe-hero-emoji {
+  opacity: 0;
+}
+
+.recipe-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 50%, rgba(0, 0, 0, 0.25) 100%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.recipe-hero.has-image::after {
+  opacity: 1;
 }
 
 .recipe-header {
@@ -694,6 +793,11 @@ body.dark select {
   margin-bottom: 20px;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--border);
+}
+
+.recipe-header > div:first-child {
+  flex: 1;
+  min-width: 0;
 }
 
 .recipe-header .menu-emoji {
@@ -991,6 +1095,22 @@ body.dark select {
   right: 12px;
 }
 
+/* Photo card: star sits on the photo with a translucent backdrop */
+.menu-card.has-photo .fav-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  z-index: 2;
+}
+
+body.dark .menu-card.has-photo .fav-btn {
+  background: rgba(40, 32, 28, 0.85);
+}
+
 .recipe-header {
   position: relative;
 }
@@ -1066,6 +1186,32 @@ body.dark select {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+}
+
+.lib-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--surface-alt);
+  background-image: linear-gradient(135deg, var(--primary-light) 0%, var(--surface-alt) 100%);
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.lib-thumb-emoji {
+  font-size: 26px;
+  line-height: 1;
+  transition: opacity 0.2s ease;
+}
+
+.lib-thumb.has-image .lib-thumb-emoji {
+  opacity: 0;
 }
 
 .lib-item .lib-info {
