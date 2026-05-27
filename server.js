@@ -63,9 +63,53 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Unsplash image search proxy. Caches per query for the process lifetime.
+// Unsplash image search proxy.
+// Fetches multiple candidates, scores each by how well its description matches
+// the query terms (and known food keywords), and only returns a URL when the
+// match feels confident. When confidence is low, returns null so the client
+// shows the emoji fallback instead of a wrong photo.
 const imageCache = new Map();
 const IMAGE_CACHE_MAX = 500;
+
+// Words that boost the score when they appear in a photo's description/tags.
+const POSITIVE_KEYWORDS = [
+  'food', 'dish', 'meal', 'cuisine', 'plate', 'bowl', 'restaurant',
+  'korean', 'asian', 'japanese', 'chinese', 'vietnamese', 'thai', 'italian',
+];
+// Words that suggest the photo isn't really the dish (raw ingredients, etc.).
+const NEGATIVE_KEYWORDS = [
+  'raw', 'ingredient', 'farm', 'market', 'vegetable display',
+  'cocktail', 'drink', 'beverage', 'menu card', 'sign', 'logo',
+];
+
+function tokenize(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
+}
+
+function scorePhoto(photo, queryTokens) {
+  const haystack = [
+    photo.alt_description || '',
+    photo.description || '',
+    ...(photo.tags || []).map(t => t.title || ''),
+  ].join(' ').toLowerCase();
+  if (!haystack.trim()) return 0;
+
+  let score = 0;
+  // +3 per query word match (these are the most important signal)
+  for (const tok of queryTokens) {
+    if (tok.length < 3) continue;
+    if (haystack.includes(tok)) score += 3;
+  }
+  // +1 per positive keyword
+  for (const kw of POSITIVE_KEYWORDS) {
+    if (haystack.includes(kw)) score += 1;
+  }
+  // -3 per negative keyword
+  for (const kw of NEGATIVE_KEYWORDS) {
+    if (haystack.includes(kw)) score -= 3;
+  }
+  return score;
+}
 
 app.get('/api/image', async (req, res) => {
   const q = String(req.query.q || '').trim();
@@ -80,8 +124,8 @@ app.get('/api/image', async (req, res) => {
   }
   try {
     const url = new URL('https://api.unsplash.com/search/photos');
-    url.searchParams.set('query', q + ' food');
-    url.searchParams.set('per_page', '1');
+    url.searchParams.set('query', q);
+    url.searchParams.set('per_page', '5');
     url.searchParams.set('orientation', 'landscape');
     url.searchParams.set('content_filter', 'high');
     const upstream = await fetch(url, {
@@ -91,15 +135,28 @@ app.get('/api/image', async (req, res) => {
       return res.status(upstream.status).json({ error: { message: 'unsplash error' } });
     }
     const data = await upstream.json();
-    const imgUrl = data.results?.[0]?.urls?.small || null;
-    if (imgUrl) {
-      if (imageCache.size >= IMAGE_CACHE_MAX) {
-        // Drop oldest entry (Map preserves insertion order)
-        imageCache.delete(imageCache.keys().next().value);
-      }
-      imageCache.set(q, imgUrl);
+    const results = data.results || [];
+
+    // Score each candidate. Minimum threshold = at least one query-word match.
+    const queryTokens = tokenize(q);
+    let best = null;
+    let bestScore = -Infinity;
+    for (const photo of results) {
+      const s = scorePhoto(photo, queryTokens);
+      if (s > bestScore) { bestScore = s; best = photo; }
     }
-    res.json({ url: imgUrl });
+
+    // Confidence threshold: need at least one strong signal.
+    // A query-word match scores +3, so anything >= 3 means we found the dish.
+    const MIN_CONFIDENCE = 3;
+    const imgUrl = (best && bestScore >= MIN_CONFIDENCE) ? (best.urls?.small || null) : null;
+
+    if (imageCache.size >= IMAGE_CACHE_MAX) {
+      imageCache.delete(imageCache.keys().next().value);
+    }
+    imageCache.set(q, imgUrl); // cache null result too — don't retry the same query
+
+    res.json({ url: imgUrl, score: bestScore });
   } catch (err) {
     console.error('[IMAGE ERROR]', err);
     res.status(502).json({ error: { message: err.message } });

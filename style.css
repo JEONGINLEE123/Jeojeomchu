@@ -358,14 +358,14 @@ body.mode-delivery .cook-only {
 /* ===== Meal Tabs ===== */
 .meal-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
   margin-bottom: 28px;
 }
 
 @media (max-width: 520px) {
   .meal-tabs {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -373,18 +373,18 @@ body.mode-delivery .cook-only {
   background: var(--surface);
   border: 2px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 14px 8px;
+  padding: 12px 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   transition: all 0.15s;
 }
 
 .meal-tab .emoji {
-  font-size: 24px;
+  font-size: 22px;
 }
 
 .meal-tab.active {
