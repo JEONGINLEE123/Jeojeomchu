@@ -1,0 +1,12 @@
+{
+  "name": "workingmom",
+  "version": "1.0.0",
+  "private": true,
+  "description": "엄마와 아빠가 함께 쓰는 오늘의 집안일 앱",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
