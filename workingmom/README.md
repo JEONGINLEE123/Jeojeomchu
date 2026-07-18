@@ -29,8 +29,8 @@ node server.js
 - 이름, 하루 경계 시각, 업무량 통계 설정
 - `localStorage` 저장 및 같은 브라우저 탭 사이 `BroadcastChannel` 동기화
 - 내장 공동 서버를 통한 같은 와이파이 기기 간 실시간 반영
-
-컴퓨터를 계속 켜두지 않고 외부에서도 사용하려면 이후 Firebase, Supabase 같은 인증·클라우드 백엔드로 옮길 수 있습니다.
+- 가족 로그인 후 이 기기에서 90일간 유지되는 보안 자동 로그인
+- Railway 공동 서버와 영구 볼륨을 통한 와이파이·모바일 데이터 접속 및 기록 공유
 
 ## `workingmom.jeojeomchu.xyz` 배포
 
@@ -39,6 +39,7 @@ node server.js
 1. Railway 서비스의 Public Networking에서 `workingmom.jeojeomchu.xyz`를 Custom Domain으로 추가합니다.
 2. Railway가 표시하는 CNAME과 소유권 확인용 TXT 레코드를 가비아 DNS 관리툴에 그대로 추가합니다.
 3. 기록 보존용 Railway Volume을 `/data`에 연결하고 환경변수 `DORAN_DATA_DIR=/data`를 설정합니다.
-4. 외부 접근 보호를 위해 `WORKINGMOM_USERNAME`과 `WORKINGMOM_PASSWORD` 환경변수를 설정합니다. 비밀번호를 설정하면 브라우저가 가족 로그인을 요청합니다.
+4. 외부 접근 보호를 위해 `WORKINGMOM_USERNAME`과 `WORKINGMOM_PASSWORD` 환경변수를 설정합니다. 로그인 성공 시 비밀번호를 브라우저에 저장하지 않고 `HttpOnly` 세션 쿠키를 발급합니다.
+5. 필요하면 `WORKINGMOM_SESSION_SECRET`에 충분히 긴 임의 문자열을 설정해 세션 서명 키를 비밀번호와 별도로 관리할 수 있습니다.
 
 기존 `jeojeomchu.xyz` 서비스와 분리해야 점심추천 앱의 배포나 장애가 WorkingMOM에 영향을 주지 않습니다.

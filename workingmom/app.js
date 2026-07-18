@@ -121,6 +121,13 @@ const ICONS = {
 
 const HAD_SAVED_STATE = Boolean(localStorage.getItem(STORAGE_KEY));
 let state = loadState();
+const USE_REMOTE_SERVER = /^https?:$/.test(window.location.protocol);
+let auth = {
+  ready: !USE_REMOTE_SERVER,
+  authenticated: !USE_REMOTE_SERVER,
+  error: "",
+};
+let remoteStream = null;
 let ui = {
   page: "today",
   filter: "all",
@@ -241,22 +248,24 @@ function saveState(message) {
 }
 
 async function pushRemoteState() {
-  if (!/^https?:$/.test(window.location.protocol)) return;
+  if (!USE_REMOTE_SERVER || !auth.authenticated) return;
   try {
-    await fetch("/api/state", {
+    const response = await fetch("/api/state", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state),
     });
+    if (response.status === 401) showLoginAgain();
   } catch (error) {
     console.info("공동 서버가 없어 이 기기에만 저장합니다.");
   }
 }
 
 async function initRemoteSync() {
-  if (!/^https?:$/.test(window.location.protocol)) return;
+  if (!USE_REMOTE_SERVER || !auth.authenticated) return;
   try {
     const response = await fetch("/api/state");
+    if (response.status === 401) return showLoginAgain();
     if (!response.ok) return;
     const remote = await response.json();
     if (remote?.state && (!HAD_SAVED_STATE || remote.state.updatedAt > state.updatedAt)) {
@@ -265,14 +274,40 @@ async function initRemoteSync() {
       pushRemoteState();
     }
 
-    const stream = new EventSource("/api/events");
-    stream.addEventListener("state", (event) => {
+    if (remoteStream) remoteStream.close();
+    remoteStream = new EventSource("/api/events");
+    remoteStream.addEventListener("state", (event) => {
       const incoming = JSON.parse(event.data);
       if (incoming.clientId === state.clientId || incoming.updatedAt <= state.updatedAt) return;
       applyRemoteState(incoming, true);
     });
   } catch (error) {
     console.info("공동 서버 연결 없이 로컬 모드로 시작합니다.");
+  }
+}
+
+function showLoginAgain() {
+  if (remoteStream) remoteStream.close();
+  remoteStream = null;
+  auth = { ready: true, authenticated: false, error: "자동 로그인 기간이 끝났어요. 다시 로그인해 주세요." };
+  render();
+}
+
+async function initializeSession() {
+  if (!USE_REMOTE_SERVER) {
+    render();
+    return;
+  }
+  render();
+  try {
+    const response = await fetch("/api/session", { cache: "no-store" });
+    auth.ready = true;
+    auth.authenticated = response.ok;
+    render();
+    if (response.ok) initRemoteSync();
+  } catch {
+    auth = { ready: true, authenticated: false, error: "서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요." };
+    render();
   }
 }
 
@@ -525,6 +560,14 @@ function navIcon(name) {
 
 function render() {
   const app = document.getElementById("app");
+  if (!auth.ready) {
+    app.innerHTML = renderAuthLoading();
+    return;
+  }
+  if (!auth.authenticated) {
+    app.innerHTML = renderLogin();
+    return;
+  }
   app.innerHTML = `
     <div class="app-shell">
       ${renderTopbar()}
@@ -533,6 +576,28 @@ function render() {
     </div>
   `;
   renderModal();
+}
+
+function renderAuthLoading() {
+  return `<main class="auth-page"><section class="auth-card auth-loading"><span class="brand-mark"></span><p>우리 집을 불러오는 중이에요…</p></section></main>`;
+}
+
+function renderLogin() {
+  return `
+    <main class="auth-page">
+      <section class="auth-card">
+        <div class="auth-brand"><span class="brand-mark"></span><div><small>Our little home</small><strong>도란도란</strong></div></div>
+        <div class="auth-copy"><p class="eyebrow">우리 가족만 들어와요</p><h1>다시 만나 반가워요</h1><p>한 번 로그인하면 이 기기에서는 90일 동안 자동으로 연결돼요.</p></div>
+        <form id="login-form" class="auth-form">
+          <label class="field-label">가족 아이디<input class="form-control" name="username" value="family" autocomplete="username" autocapitalize="none" required></label>
+          <label class="field-label">비밀번호<input class="form-control" type="password" name="password" autocomplete="current-password" required autofocus></label>
+          ${auth.error ? `<p class="auth-error" role="alert">${escapeHtml(auth.error)}</p>` : ""}
+          <button class="btn primary auth-submit" type="submit">우리 집 들어가기</button>
+        </form>
+        <p class="auth-note">비밀번호는 이 휴대폰에 저장하지 않아요. 공용 기기에서는 설정의 로그아웃을 눌러주세요.</p>
+      </section>
+    </main>
+  `;
 }
 
 function renderTopbar() {
@@ -924,6 +989,13 @@ function renderSettings() {
           <label class="toggle" style="justify-self:end"><input type="checkbox" data-setting-toggle="showStats" ${state.household.showStats ? "checked" : ""}><span></span></label>
         </div>
       </section>
+      ${USE_REMOTE_SERVER ? `<section class="settings-section">
+        <h2>로그인</h2>
+        <div class="setting-row">
+          <div><h3>이 기기 자동 로그인</h3><p>90일 동안 유지돼요. 휴대폰을 바꾸거나 공용 기기에서 사용했다면 로그아웃해 주세요.</p></div>
+          <button class="btn" data-action="logout">이 기기 로그아웃</button>
+        </div>
+      </section>` : ""}
       <section class="danger-zone">
         <div><h3>처음 상태로 되돌리기</h3><p>이 브라우저에 저장된 완료 기록과 설정을 모두 지워요.</p></div>
         <button class="btn danger" data-action="reset">모든 기록 초기화</button>
@@ -1054,6 +1126,7 @@ document.addEventListener("click", (event) => {
   if (action === "toggle-day-off") return toggleDayOff(actionButton.dataset.date);
   if (action === "reset-today") return resetTodayChecks();
   if (action === "reset-date") return resetDateChecks(actionButton.dataset.date);
+  if (action === "logout") return logout();
   if (action === "modal-close") return closeModal();
   if (action === "modal-backdrop" && event.target === actionButton) return closeModal();
   if (action === "reset") return resetAll();
@@ -1098,8 +1171,34 @@ document.addEventListener("change", (event) => {
   }
 });
 
-document.addEventListener("submit", (event) => {
+document.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (event.target.id === "login-form") {
+    const form = new FormData(event.target);
+    const button = event.target.querySelector("button[type='submit']");
+    button.disabled = true;
+    button.textContent = "확인하는 중…";
+    auth.error = "";
+    try {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: form.get("username"), password: form.get("password") }),
+      });
+      if (!response.ok) {
+        auth.error = response.status === 429 ? "잠시 동안 로그인 시도가 많았어요. 15분 뒤 다시 시도해 주세요." : "아이디 또는 비밀번호를 다시 확인해 주세요.";
+        render();
+        return;
+      }
+      auth = { ready: true, authenticated: true, error: "" };
+      render();
+      initRemoteSync();
+    } catch {
+      auth.error = "서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.";
+      render();
+    }
+    return;
+  }
   if (event.target.id === "complete-form") {
     const form = new FormData(event.target);
     completeTask(ui.modalData.taskId, form.get("member"), String(form.get("note") || "").trim());
@@ -1258,6 +1357,19 @@ function resetAll() {
   saveState("처음 상태로 되돌렸어요.");
 }
 
+async function logout() {
+  if (!window.confirm("이 기기에서 로그아웃할까요? 집안일 기록은 그대로 남아 있어요.")) return;
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } finally {
+    if (remoteStream) remoteStream.close();
+    remoteStream = null;
+    auth = { ready: true, authenticated: false, error: "" };
+    ui.page = "today";
+    render();
+  }
+}
+
 function closeModal(shouldRender = true) {
   ui.modal = null;
   ui.modalData = null;
@@ -1274,5 +1386,4 @@ function toast(message) {
   window.setTimeout(() => node.remove(), 3100);
 }
 
-render();
-initRemoteSync();
+initializeSession();
