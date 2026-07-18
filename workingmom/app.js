@@ -176,7 +176,7 @@ function makeInitialState() {
   }));
 
   return {
-    version: 2,
+    version: 3,
     clientId: `client-${Math.random().toString(36).slice(2)}`,
     updatedAt: now,
     currentMember: "wife",
@@ -198,6 +198,7 @@ function makeInitialState() {
     subtaskProgress: {},
     taskOverrides: {},
     customTasks: [],
+    shoppingItems: [],
   };
 }
 
@@ -222,7 +223,7 @@ function normalizeState(input = {}, overrides = {}) {
     ...base,
     ...input,
     ...overrides,
-    version: 2,
+    version: 3,
     household: {
       ...base.household,
       ...household,
@@ -235,6 +236,7 @@ function normalizeState(input = {}, overrides = {}) {
     },
     events: Array.isArray(input.events) ? input.events : base.events,
     customTasks: Array.isArray(input.customTasks) ? input.customTasks : [],
+    shoppingItems: Array.isArray(input.shoppingItems) ? input.shoppingItems : [],
   };
 }
 
@@ -552,6 +554,7 @@ function navIcon(name) {
   const paths = {
     today: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M9 20v-6h6v6"/>',
     all: '<path d="M5 6h14M5 12h14M5 18h14"/><circle cx="3" cy="6" r=".4"/><circle cx="3" cy="12" r=".4"/><circle cx="3" cy="18" r=".4"/>',
+    shopping: '<path d="M4 5h2l2 10h9l2-7H7"/><circle cx="10" cy="19" r="1"/><circle cx="17" cy="19" r="1"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3a1.7 1.7 0 0 0 1.1 1.6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .27.3.62.4 1 .4h.1v4H21a1.7 1.7 0 0 0-1.6.6Z"/>',
   };
@@ -626,7 +629,8 @@ function renderBottomNav() {
   const count = dueTasks().length;
   const items = [
     ["today", "오늘"],
-    ["all", "전체 집안일"],
+    ["all", "집안일"],
+    ["shopping", "장보기"],
     ["history", "기록"],
     ["settings", "설정"],
   ];
@@ -645,9 +649,41 @@ function renderBottomNav() {
 
 function renderPage() {
   if (ui.page === "all") return renderAllTasks();
+  if (ui.page === "shopping") return renderShopping();
   if (ui.page === "history") return renderHistory();
   if (ui.page === "settings") return renderSettings();
   return renderToday();
+}
+
+function renderShopping() {
+  const items = [...state.shoppingItems].sort((a, b) => Number(a.checked) - Number(b.checked) || new Date(a.createdAt) - new Date(b.createdAt));
+  const remaining = items.filter((item) => !item.checked).length;
+  const bought = items.length - remaining;
+  return `
+    <div class="inner-page shopping-page">
+      <header class="inner-header">
+        <div><p class="eyebrow">잊지 않고 함께</p><h1>장보기 목록</h1><p>${remaining ? `살 것 ${remaining}개가 남아 있어요.` : items.length ? "모두 장바구니에 담았어요." : "필요한 것을 함께 적어두세요."}</p></div>
+        ${bought ? `<button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}
+      </header>
+      <section class="shopping-panel">
+        <form id="shopping-form" class="shopping-form">
+          <label class="shopping-name"><span class="sr-only">살 품목</span><input class="form-control" name="name" maxlength="60" placeholder="무엇을 살까요?" autocomplete="off" required></label>
+          <label><span class="sr-only">수량 또는 메모</span><input class="form-control" name="detail" maxlength="60" placeholder="수량·메모 (선택)" autocomplete="off"></label>
+          <button class="btn primary" type="submit">목록에 추가</button>
+        </form>
+        <div class="shopping-summary"><span><strong>${remaining}</strong>개 남음</span><span>${bought}개 구매</span></div>
+        ${items.length ? `<div class="shopping-list">${items.map((item) => `
+          <article class="shopping-row ${item.checked ? "checked" : ""}">
+            <button class="shopping-check" data-action="shopping-toggle" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} ${item.checked ? "다시 살 것으로 표시" : "구매 완료"}" aria-pressed="${item.checked}">${item.checked ? "✓" : ""}</button>
+            <button class="shopping-content" data-action="shopping-toggle" data-shopping-id="${item.id}">
+              <strong>${escapeHtml(item.name)}</strong>
+              <span>${item.detail ? escapeHtml(item.detail) : `${escapeHtml(nameFor(item.addedBy))}이(가) 추가`}${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
+            </button>
+            <button class="shopping-delete" data-action="shopping-delete" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 삭제">×</button>
+          </article>`).join("")}</div>` : `<div class="shopping-empty"><span>🛒</span><strong>아직 장볼 것이 없어요</strong><p>우유, 기저귀처럼 생각난 순간 바로 적어두세요.</p></div>`}
+      </section>
+    </div>
+  `;
 }
 
 function renderToday() {
@@ -997,7 +1033,7 @@ function renderSettings() {
         </div>
       </section>` : ""}
       <section class="danger-zone">
-        <div><h3>처음 상태로 되돌리기</h3><p>이 브라우저에 저장된 완료 기록과 설정을 모두 지워요.</p></div>
+        <div><h3>처음 상태로 되돌리기</h3><p>공유된 완료 기록, 장보기 목록과 설정을 모두 지워요.</p></div>
         <button class="btn danger" data-action="reset">모든 기록 초기화</button>
       </section>
     </div>
@@ -1124,6 +1160,9 @@ document.addEventListener("click", (event) => {
   }
   if (action === "toggle-night-day") return toggleNightDay(Number(actionButton.dataset.day));
   if (action === "toggle-day-off") return toggleDayOff(actionButton.dataset.date);
+  if (action === "shopping-toggle") return toggleShoppingItem(actionButton.dataset.shoppingId);
+  if (action === "shopping-delete") return deleteShoppingItem(actionButton.dataset.shoppingId);
+  if (action === "shopping-clear-bought") return clearBoughtShoppingItems();
   if (action === "reset-today") return resetTodayChecks();
   if (action === "reset-date") return resetDateChecks(actionButton.dataset.date);
   if (action === "logout") return logout();
@@ -1206,6 +1245,9 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "task-form") {
     saveTaskFromForm(new FormData(event.target));
   }
+  if (event.target.id === "shopping-form") {
+    addShoppingItem(new FormData(event.target));
+  }
 });
 
 document.addEventListener("keydown", (event) => {
@@ -1222,6 +1264,47 @@ function toggleClaim(taskId) {
   if (claim) return;
   state.claims[taskId] = { memberId: state.currentMember, claimedAt: new Date().toISOString() };
   saveState(`${nameFor(state.currentMember)}이(가) 하기로 했어요.`);
+}
+
+function addShoppingItem(form) {
+  const name = String(form.get("name") || "").trim();
+  const detail = String(form.get("detail") || "").trim();
+  if (!name) return;
+  state.shoppingItems.push({
+    id: `shopping-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: name.slice(0, 60),
+    detail: detail.slice(0, 60),
+    checked: false,
+    addedBy: state.currentMember,
+    checkedBy: null,
+    createdAt: new Date().toISOString(),
+    checkedAt: null,
+  });
+  saveState(`${name}을(를) 장보기 목록에 추가했어요.`);
+  requestAnimationFrame(() => document.querySelector("#shopping-form input[name='name']")?.focus());
+}
+
+function toggleShoppingItem(itemId) {
+  const item = state.shoppingItems.find((entry) => entry.id === itemId);
+  if (!item) return;
+  item.checked = !item.checked;
+  item.checkedBy = item.checked ? state.currentMember : null;
+  item.checkedAt = item.checked ? new Date().toISOString() : null;
+  saveState(item.checked ? `${item.name}, 장바구니에 담았어요.` : `${item.name}을(를) 다시 살 목록으로 옮겼어요.`);
+}
+
+function deleteShoppingItem(itemId) {
+  const item = state.shoppingItems.find((entry) => entry.id === itemId);
+  if (!item) return;
+  state.shoppingItems = state.shoppingItems.filter((entry) => entry.id !== itemId);
+  saveState(`${item.name}을(를) 목록에서 지웠어요.`);
+}
+
+function clearBoughtShoppingItems() {
+  const bought = state.shoppingItems.filter((item) => item.checked).length;
+  if (!bought) return;
+  state.shoppingItems = state.shoppingItems.filter((item) => !item.checked);
+  saveState(`구매한 품목 ${bought}개를 정리했어요.`);
 }
 
 function toggleNightDay(day) {
@@ -1349,7 +1432,7 @@ function saveTaskFromForm(form) {
 }
 
 function resetAll() {
-  if (!window.confirm("완료 기록과 설정을 모두 처음 상태로 되돌릴까요?")) return;
+  if (!window.confirm("완료 기록, 장보기 목록과 설정을 모두 처음 상태로 되돌릴까요?")) return;
   const currentMember = state.currentMember;
   state = makeInitialState();
   state.currentMember = currentMember;
