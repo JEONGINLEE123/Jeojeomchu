@@ -352,6 +352,14 @@ function dateKeyToUtc(key) {
   return Date.UTC(year, month - 1, day);
 }
 
+function dateKeyPlusDays(key, days) {
+  const date = new Date(dateKeyToUtc(key) + days * DAY_MS);
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function dayDifference(fromTimestamp, toTimestamp = Date.now()) {
   const from = operationalDate(fromTimestamp);
   const to = operationalDate(toTimestamp);
@@ -377,7 +385,10 @@ function conditionalIsOpen(taskId) {
 
 function getTaskStatus(task) {
   if (!task.active) return { key: "inactive", label: "비활성", age: null };
-  if (state.postponed[task.id] === operationalDate()) return { key: "postponed", label: "오늘 미룸", age: null };
+  const today = operationalDate();
+  const postponement = state.postponed[task.id];
+  if (postponement === today) return { key: "postponed", label: "오늘 미룸", age: null };
+  if (postponement?.until && today < postponement.until) return { key: "postponed", label: "내일 하기로 함", age: null };
 
   if (task.recurrence === "conditional") {
     return conditionalIsOpen(task.id)
@@ -434,7 +445,7 @@ function eventsToday() {
 function hasTodayCheckState() {
   const today = operationalDate();
   const hasEvents = state.events.some((event) => ["completed", "not_needed"].includes(event.eventType) && operationalDate(event.createdAt) === today);
-  const hasPostponed = Object.values(state.postponed).includes(today);
+  const hasPostponed = Object.values(state.postponed).some((value) => value === today || value?.hiddenOn === today);
   const hasSubtasks = Object.values(state.subtaskProgress).some((progress) => Object.values(progress || {}).some(Boolean));
   return hasEvents || hasPostponed || hasSubtasks;
 }
@@ -774,7 +785,7 @@ function renderTaskCard(task, status) {
         <button class="btn primary" data-action="complete-open" data-task="${task.id}" ${task.subtasks?.length && !allChecked ? "disabled title=\"세부 항목을 먼저 확인해 주세요\"" : ""}>${task.kind === "timer" ? `${task.timerMinutes}분 완료` : "완료"}</button>
         <div class="more-actions">
           <button class="btn ghost" data-action="menu" data-task="${task.id}" aria-label="더 보기">•••</button>
-          ${ui.openMenu === task.id ? `<div class="more-menu"><button data-action="postpone" data-task="${task.id}">오늘만 미루기</button></div>` : ""}
+          ${ui.openMenu === task.id ? `<div class="more-menu"><button data-action="postpone-tomorrow" data-task="${task.id}">내일 하자</button><button data-action="postpone" data-task="${task.id}">오늘만 미루기</button></div>` : ""}
         </div>
       </div>
     </article>
@@ -1130,6 +1141,7 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (action === "postpone") return postponeTask(taskId);
+  if (action === "postpone-tomorrow") return postponeUntilTomorrow(taskId);
   if (action === "not-needed") return markNotNeeded(taskId);
   if (action === "complete-open") {
     ui.modal = "complete";
@@ -1339,7 +1351,7 @@ function resetDateChecks(date) {
 
   state.events = state.events.filter((event) => !(["completed", "not_needed"].includes(event.eventType) && operationalDate(event.createdAt) === date));
   if (isToday) {
-    state.postponed = Object.fromEntries(Object.entries(state.postponed).filter(([, postponedDate]) => postponedDate !== date));
+    state.postponed = Object.fromEntries(Object.entries(state.postponed).filter(([, value]) => value !== date && value?.hiddenOn !== date));
     state.subtaskProgress = {};
   }
   saveState(`${isToday ? "오늘" : "선택한 날"} 체크만 초기화했어요. 집안일과 설정은 그대로예요.`);
@@ -1349,6 +1361,13 @@ function postponeTask(taskId) {
   state.postponed[taskId] = operationalDate();
   ui.openMenu = null;
   saveState("오늘 화면에서만 숨겼어요. 주기는 그대로예요.");
+}
+
+function postponeUntilTomorrow(taskId) {
+  const today = operationalDate();
+  state.postponed[taskId] = { hiddenOn: today, until: dateKeyPlusDays(today, 1) };
+  ui.openMenu = null;
+  saveState("내일 할 일로 미뤘어요. 내일 목록에 다시 나타나요.");
 }
 
 function markNotNeeded(taskId) {
