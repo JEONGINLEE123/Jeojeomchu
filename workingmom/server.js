@@ -21,13 +21,18 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LIMIT = 8;
 const clients = new Set();
 const loginAttempts = new Map();
-const PUBLIC_FILES = new Set(["/", "/index.html", "/styles.css", "/app.js"]);
+const PUBLIC_FILES = new Set([
+  "/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest",
+  "/icons/favicon-32.png", "/icons/apple-touch-icon.png", "/icons/icon-192.png",
+  "/icons/icon-512.png", "/icons/icon-1024.png",
+]);
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
 };
