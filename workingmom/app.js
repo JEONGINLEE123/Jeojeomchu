@@ -754,7 +754,7 @@ function renderTaskCard(task, status) {
   const timingHint = taskTimingHint(task);
 
   return `
-    <article class="task-card ${status.key === "overdue" ? "overdue" : ""}">
+    <article class="task-card ${status.key === "overdue" ? "overdue" : ""} ${ui.openMenu === task.id ? "menu-open" : ""}">
       <div class="task-icon ${task.category}">${ICONS[task.icon] || "·"}</div>
       <div class="task-main">
         <div class="task-kicker"><span class="${statusClass}">${status.label}</span><span>·</span><span>${relativeLastText(task)}</span><span>·</span><span>${task.estimate}분</span></div>

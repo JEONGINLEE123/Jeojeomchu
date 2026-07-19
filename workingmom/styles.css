@@ -540,6 +540,10 @@ button,
   border-left: 3px solid var(--red);
 }
 
+.task-card.menu-open {
+  z-index: 20;
+}
+
 .task-card.completed-card {
   grid-template-columns: 38px minmax(0, 1fr) auto;
   padding: 14px 16px;
@@ -752,9 +756,9 @@ button,
 
 .more-menu {
   position: absolute;
-  z-index: 10;
-  top: calc(100% + 6px);
+  z-index: 30;
   right: 0;
+  bottom: calc(100% + 6px);
   min-width: 126px;
   padding: 5px;
   border: 1px solid var(--line);
