@@ -134,7 +134,6 @@ let ui = {
   modal: null,
   modalData: null,
   completionMember: state.currentMember,
-  openMenu: null,
 };
 
 let channel = null;
@@ -765,7 +764,7 @@ function renderTaskCard(task, status) {
   const timingHint = taskTimingHint(task);
 
   return `
-    <article class="task-card ${status.key === "overdue" ? "overdue" : ""} ${ui.openMenu === task.id ? "menu-open" : ""}">
+    <article class="task-card ${status.key === "overdue" ? "overdue" : ""}">
       <div class="task-icon ${task.category}">${ICONS[task.icon] || "·"}</div>
       <div class="task-main">
         <div class="task-kicker"><span class="${statusClass}">${status.label}</span><span>·</span><span>${relativeLastText(task)}</span><span>·</span><span>${task.estimate}분</span></div>
@@ -782,11 +781,8 @@ function renderTaskCard(task, status) {
       <div class="task-actions">
         <button class="btn ${ownClaim ? "ghost" : ""}" data-action="claim" data-task="${task.id}" ${otherClaim ? "disabled" : ""}>${ownClaim ? "맡기 취소" : otherClaim ? `${escapeHtml(nameFor(claim.memberId))} 맡음` : "내가 할게"}</button>
         ${isCheck ? `<button class="btn" data-action="not-needed" data-task="${task.id}">아직 괜찮음</button>` : ""}
+        <button class="btn tomorrow" data-action="postpone-tomorrow" data-task="${task.id}">내일 하자</button>
         <button class="btn primary" data-action="complete-open" data-task="${task.id}" ${task.subtasks?.length && !allChecked ? "disabled title=\"세부 항목을 먼저 확인해 주세요\"" : ""}>${task.kind === "timer" ? `${task.timerMinutes}분 완료` : "완료"}</button>
-        <div class="more-actions">
-          <button class="btn ghost" data-action="menu" data-task="${task.id}" aria-label="더 보기">•••</button>
-          ${ui.openMenu === task.id ? `<div class="more-menu"><button data-action="postpone-tomorrow" data-task="${task.id}">내일 하자</button><button data-action="postpone" data-task="${task.id}">오늘만 미루기</button></div>` : ""}
-        </div>
       </div>
     </article>
   `;
@@ -1103,7 +1099,6 @@ document.addEventListener("click", (event) => {
   const pageButton = event.target.closest("[data-page]");
   if (pageButton) {
     ui.page = pageButton.dataset.page;
-    ui.openMenu = null;
     window.scrollTo({ top: 0, behavior: "smooth" });
     render();
     return;
@@ -1126,21 +1121,12 @@ document.addEventListener("click", (event) => {
   }
 
   const actionButton = event.target.closest("[data-action]");
-  if (!actionButton) {
-    if (ui.openMenu) { ui.openMenu = null; render(); }
-    return;
-  }
+  if (!actionButton) return;
 
   const action = actionButton.dataset.action;
   const taskId = actionButton.dataset.task;
 
   if (action === "claim") return toggleClaim(taskId);
-  if (action === "menu") {
-    ui.openMenu = ui.openMenu === taskId ? null : taskId;
-    render();
-    return;
-  }
-  if (action === "postpone") return postponeTask(taskId);
   if (action === "postpone-tomorrow") return postponeUntilTomorrow(taskId);
   if (action === "not-needed") return markNotNeeded(taskId);
   if (action === "complete-open") {
@@ -1357,16 +1343,9 @@ function resetDateChecks(date) {
   saveState(`${isToday ? "오늘" : "선택한 날"} 체크만 초기화했어요. 집안일과 설정은 그대로예요.`);
 }
 
-function postponeTask(taskId) {
-  state.postponed[taskId] = operationalDate();
-  ui.openMenu = null;
-  saveState("오늘 화면에서만 숨겼어요. 주기는 그대로예요.");
-}
-
 function postponeUntilTomorrow(taskId) {
   const today = operationalDate();
   state.postponed[taskId] = { hiddenOn: today, until: dateKeyPlusDays(today, 1) };
-  ui.openMenu = null;
   saveState("내일 할 일로 미뤘어요. 내일 목록에 다시 나타나요.");
 }
 

@@ -540,10 +540,6 @@ button,
   border-left: 3px solid var(--red);
 }
 
-.task-card.menu-open {
-  z-index: 20;
-}
-
 .task-card.completed-card {
   grid-template-columns: 38px minmax(0, 1fr) auto;
   padding: 14px 16px;
@@ -735,6 +731,18 @@ button,
   background: #265e4c;
 }
 
+.btn.tomorrow {
+  border-color: #d7ded9;
+  color: #53655d;
+  background: #f1f5f2;
+}
+
+.btn.tomorrow:hover {
+  border-color: #bdcec4;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
 .btn.ghost {
   border-color: transparent;
   color: var(--muted);
@@ -748,40 +756,6 @@ button,
 .btn:disabled {
   opacity: 0.46;
   cursor: not-allowed;
-}
-
-.more-actions {
-  position: relative;
-}
-
-.more-menu {
-  position: absolute;
-  z-index: 30;
-  right: 0;
-  bottom: calc(100% + 6px);
-  min-width: 126px;
-  padding: 5px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--white);
-  box-shadow: var(--shadow-small);
-}
-
-.more-menu button {
-  width: 100%;
-  padding: 9px 10px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--muted);
-  background: none;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 700;
-  text-align: left;
-}
-
-.more-menu button:hover {
-  background: var(--paper);
 }
 
 .sidebar {
