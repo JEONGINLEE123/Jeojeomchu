@@ -4,7 +4,11 @@
   "private": true,
   "description": "엄마와 아빠가 함께 쓰는 오늘의 집안일 앱",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check app.js && node --check server.js && node --check sw.js"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
   },
   "engines": {
     "node": ">=18"

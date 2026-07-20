@@ -1,5 +1,17 @@
 const STORAGE_KEY = "doran-chores-v1";
+const DEVICE_MEMBER_KEY = "doran-device-member-v1";
+const PENDING_REPLACE_KEY = "doran-pending-replace-v1";
+const DEVICE_LOGGED_OUT_KEY = "doran-device-logged-out-v1";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const SHOPPING_CATEGORIES = { food: "식품", baby: "육아", living: "생활", other: "기타" };
+const QUICK_SHOPPING_ITEMS = [
+  { name: "우유", category: "food" },
+  { name: "계란", category: "food" },
+  { name: "기저귀", category: "baby" },
+  { name: "물티슈", category: "baby" },
+  { name: "휴지", category: "living" },
+  { name: "세제", category: "living" },
+];
 
 const TASKS = [
   {
@@ -23,17 +35,29 @@ const TASKS = [
   { id: "laundry-organize", title: "빨랫감 정리", category: "laundry", icon: "shirt", kind: "check", recurrence: "window", minDays: 2, maxDays: 3, estimate: 12, description: "마른 빨래를 개고 뒹구는 옷을 정리해요." },
   { id: "boil-water", title: "물 끓이기", category: "kitchen", icon: "kettle", kind: "action", recurrence: "window", minDays: 2, maxDays: 3, estimate: 8, description: "필요한 만큼 물을 끓여 준비해요." },
   {
-    id: "laundry-batches",
-    title: "쌓인 빨래 처리",
-    category: "laundry",
+    id: "laundry-bureumi",
+    title: "부름이 빨래",
+    category: "baby",
     icon: "washer",
     kind: "check-group",
     recurrence: "window",
     minDays: 2,
     maxDays: 3,
-    estimate: 35,
-    description: "부름이 손수건과 옷은 각각 세탁망에 넣어 돌려요.",
-    subtasks: ["수건", "흰옷", "부름이 손수건", "부름이 옷"],
+    estimate: 25,
+    description: "부름이 손수건과 옷은 각각 세탁망에 넣어서 돌려요.",
+    subtasks: ["손수건 세탁망", "옷 세탁망", "세탁"],
+  },
+  {
+    id: "laundry-whites",
+    title: "수건·속옷·흰옷 빨래",
+    category: "laundry",
+    icon: "washer",
+    kind: "check",
+    recurrence: "window",
+    minDays: 2,
+    maxDays: 3,
+    estimate: 30,
+    description: "수건과 속옷, 흰옷을 모아 함께 세탁해요.",
   },
   {
     id: "bottle-sterilize",
@@ -51,7 +75,7 @@ const TASKS = [
   { id: "drawer", title: "서랍장 속 옷 정리", category: "organize", icon: "drawer", kind: "timer", recurrence: "weekly", intervalDays: 7, estimate: 10, timerMinutes: 10, description: "전부 끝내지 않아도 괜찮아요. 딱 10분만 정리해요." },
   { id: "trash", title: "쓰레기통 비우기", category: "living", icon: "trash", kind: "check-group", recurrence: "weekly", intervalDays: 7, estimate: 10, description: "찬 곳만 골라 비워도 괜찮아요.", subtasks: ["거실", "안방", "재활용"] },
   { id: "stove", title: "가스레인지 쪽 청소", category: "kitchen", icon: "stove", kind: "action", recurrence: "weekly", intervalDays: 7, estimate: 15, description: "눌어붙기 전에 주변 기름때를 닦아요." },
-  { id: "work-clothes", title: "작업복·검정옷 세탁", category: "laundry", icon: "shirt", kind: "check", recurrence: "weekly", intervalDays: 7, estimate: 25, description: "빨래가 충분히 모였는지 먼저 확인해요." },
+  { id: "work-clothes", title: "검정옷 빨래", category: "laundry", icon: "shirt", kind: "check", recurrence: "weekly", intervalDays: 7, estimate: 25, description: "아빠 작업복과 검정옷을 모아 세탁해요." },
   { id: "bedding", title: "침구 세탁", category: "laundry", icon: "bed", kind: "group", recurrence: "biweekly", intervalDays: 14, estimate: 45, description: "세탁 후 건조는 빨래방에서 해요.", subtasks: ["침구 세탁", "빨래방 건조"] },
   { id: "under-mattress", title: "매트리스 아래 청소", category: "floor", icon: "bed", kind: "group", recurrence: "biweekly", intervalDays: 14, estimate: 30, description: "둘이 함께하면 훨씬 수월해요.", subtasks: ["매트리스 걷기", "바닥 쓸기", "바닥 닦기"] },
   { id: "bathroom", title: "화장실 청소", category: "bathroom", icon: "bath", kind: "action", recurrence: "monthly", estimate: 35, description: "한 달에 한 번, 전체를 산뜻하게 청소해요." },
@@ -64,7 +88,8 @@ const SEED_AGES = {
   "floor-mop": 0,
   "laundry-organize": 2,
   "boil-water": 1,
-  "laundry-batches": 0,
+  "laundry-bureumi": 0,
+  "laundry-whites": 0,
   "window-frame": 5,
   "computer-room": 3,
   drawer: 4,
@@ -128,9 +153,16 @@ let auth = {
   error: "",
 };
 let remoteStream = null;
+let connectionAvailable = navigator.onLine;
+let remotePushInFlight = false;
+let remotePushQueued = false;
+let serviceWorkerRegistration = null;
+let pushInfo = { supported: false, enabled: false, permission: typeof Notification === "undefined" ? "unsupported" : Notification.permission, loading: false };
 let ui = {
   page: "today",
   filter: "all",
+  historyDate: operationalDate(),
+  historyMonth: operationalDate().slice(0, 7),
   modal: null,
   modalData: null,
   completionMember: state.currentMember,
@@ -175,9 +207,10 @@ function makeInitialState() {
   }));
 
   return {
-    version: 3,
+    version: 6,
     clientId: `client-${Math.random().toString(36).slice(2)}`,
     updatedAt: now,
+    startedAt: new Date(now).toISOString(),
     currentMember: "wife",
     household: {
       wifeName: "엄마",
@@ -186,6 +219,7 @@ function makeInitialState() {
       showStats: true,
       morningAlert: "09:00",
       eveningAlert: "20:30",
+      partnerAlerts: false,
       workSchedule: {
         wife: { nightDays: [2, 3], start: "23:00", end: "08:00" },
         husband: { start: "10:30", end: "21:30", daysOff: [] },
@@ -198,31 +232,101 @@ function makeInitialState() {
     taskOverrides: {},
     customTasks: [],
     shoppingItems: [],
+    deletedEventIds: {},
+    shoppingDeletedIds: {},
+    syncMeta: { fields: {}, objects: {} },
+    notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [] },
   };
 }
 
 function loadState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return makeInitialState();
+    if (!saved) {
+      const initial = makeInitialState();
+      const deviceMember = localStorage.getItem(DEVICE_MEMBER_KEY);
+      if (["wife", "husband"].includes(deviceMember)) initial.currentMember = deviceMember;
+      return initial;
+    }
     const parsed = JSON.parse(saved);
-    return normalizeState(parsed, { clientId: `client-${Math.random().toString(36).slice(2)}` });
+    const deviceMember = localStorage.getItem(DEVICE_MEMBER_KEY);
+    return normalizeState(parsed, {
+      clientId: `client-${Math.random().toString(36).slice(2)}`,
+      currentMember: ["wife", "husband"].includes(deviceMember) ? deviceMember : parsed.currentMember,
+    });
   } catch (error) {
     console.warn("저장된 데이터를 불러오지 못했습니다.", error);
     return makeInitialState();
   }
 }
 
+function migrateState(input = {}) {
+  const migrated = JSON.parse(JSON.stringify(input || {}));
+  const version = Number(migrated.version || 1);
+  const legacyEvents = Array.isArray(migrated.events) ? migrated.events.filter((event) => event.taskId === "laundry-batches") : [];
+  if (version < 4 || legacyEvents.length) {
+    const otherEvents = Array.isArray(migrated.events) ? migrated.events.filter((event) => event.taskId !== "laundry-batches") : [];
+    for (const event of legacyEvents) {
+      for (const taskId of ["laundry-bureumi", "laundry-whites"]) {
+        const id = `${event.id}-${taskId}`;
+        if (!otherEvents.some((candidate) => candidate.id === id)) otherEvents.push({ ...event, id, taskId });
+      }
+    }
+    migrated.events = otherEvents;
+
+    for (const field of ["claims", "postponed"]) {
+      if (migrated[field]?.["laundry-batches"]) {
+        migrated[field]["laundry-bureumi"] = { ...migrated[field]["laundry-batches"] };
+        migrated[field]["laundry-whites"] = { ...migrated[field]["laundry-batches"] };
+        delete migrated[field]["laundry-batches"];
+      }
+    }
+    const oldProgress = migrated.subtaskProgress?.["laundry-batches"];
+    if (oldProgress) {
+      migrated.subtaskProgress["laundry-bureumi"] = { 0: Boolean(oldProgress[2]), 1: Boolean(oldProgress[3]), 2: false };
+      migrated.subtaskProgress["laundry-whites"] = { 0: Boolean(oldProgress[0]) && Boolean(oldProgress[1]) };
+      delete migrated.subtaskProgress["laundry-batches"];
+    }
+  }
+  if (!migrated.startedAt) {
+    const recordedDates = (migrated.events || [])
+      .filter((event) => event.eventType !== "baseline" && event.createdAt)
+      .map((event) => new Date(event.createdAt).getTime())
+      .filter(Number.isFinite);
+    migrated.startedAt = new Date(recordedDates.length ? Math.min(...recordedDates) : Date.now()).toISOString();
+  }
+  migrated.version = 6;
+  return migrated;
+}
+
 function normalizeState(input = {}, overrides = {}) {
+  input = migrateState(input);
   const base = makeInitialState();
   const household = input.household || {};
   const workSchedule = household.workSchedule || {};
   const isLegacy = Number(input.version || 1) < 2;
+  const timestamp = Number(input.updatedAt || Date.now());
+  const shoppingItems = (Array.isArray(input.shoppingItems) ? input.shoppingItems : []).map((item) => ({
+    category: "other",
+    ...item,
+    updatedAt: Number(item.updatedAt || new Date(item.checkedAt || item.createdAt || timestamp).getTime() || timestamp),
+  }));
+  const syncMeta = {
+    fields: { ...(input.syncMeta?.fields || {}) },
+    objects: { ...(input.syncMeta?.objects || {}) },
+  };
+  for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
+    syncMeta.objects[field] = { ...(syncMeta.objects[field] || {}) };
+    for (const key of Object.keys(input[field] || {})) syncMeta.objects[field][key] ||= timestamp;
+  }
+  syncMeta.fields.household ||= timestamp;
+  syncMeta.fields.customTasks ||= timestamp;
+
   return {
     ...base,
     ...input,
     ...overrides,
-    version: 3,
+    version: 6,
     household: {
       ...base.household,
       ...household,
@@ -235,31 +339,98 @@ function normalizeState(input = {}, overrides = {}) {
     },
     events: Array.isArray(input.events) ? input.events : base.events,
     customTasks: Array.isArray(input.customTasks) ? input.customTasks : [],
-    shoppingItems: Array.isArray(input.shoppingItems) ? input.shoppingItems : [],
+    shoppingItems,
+    deletedEventIds: { ...(input.deletedEventIds || {}) },
+    shoppingDeletedIds: { ...(input.shoppingDeletedIds || {}) },
+    syncMeta,
+    notificationSummary: { ...base.notificationSummary, ...(input.notificationSummary || {}) },
   };
 }
 
-function saveState(message) {
-  state.updatedAt = Date.now();
+function jsonChanged(left, right) {
+  return JSON.stringify(left) !== JSON.stringify(right);
+}
+
+function stampStateChanges(previous, now) {
+  state.syncMeta ||= { fields: {}, objects: {} };
+  state.syncMeta.fields ||= {};
+  state.syncMeta.objects ||= {};
+  for (const field of ["household", "customTasks"]) {
+    if (jsonChanged(previous?.[field], state[field])) state.syncMeta.fields[field] = now;
+  }
+  for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
+    state.syncMeta.objects[field] ||= {};
+    const before = previous?.[field] || {};
+    const after = state[field] || {};
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (jsonChanged(before[key], after[key])) state.syncMeta.objects[field][key] = now;
+    }
+  }
+
+  const currentEventIds = new Set((state.events || []).map((event) => event.id));
+  state.deletedEventIds ||= {};
+  for (const event of previous?.events || []) {
+    if (!currentEventIds.has(event.id)) state.deletedEventIds[event.id] = now;
+  }
+
+  const previousShopping = new Map((previous?.shoppingItems || []).map((item) => [item.id, item]));
+  const currentShoppingIds = new Set((state.shoppingItems || []).map((item) => item.id));
+  state.shoppingDeletedIds ||= {};
+  for (const item of state.shoppingItems || []) {
+    if (jsonChanged(previousShopping.get(item.id), item)) item.updatedAt = now;
+  }
+  for (const item of previous?.shoppingItems || []) {
+    if (!currentShoppingIds.has(item.id)) state.shoppingDeletedIds[item.id] = now;
+  }
+}
+
+function saveState(message, options = {}) {
+  let previous = null;
+  try { previous = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); } catch { previous = null; }
+  const now = Date.now();
+  stampStateChanges(previous, now);
+  state.version = 6;
+  state.updatedAt = now;
+  state.notificationSummary = buildNotificationSummary();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   if (channel) channel.postMessage({ source: state.clientId, state });
   pushRemoteState();
   render();
-  if (message) toast(message);
+  if (message) toast(message, options);
 }
 
 async function pushRemoteState() {
   if (!USE_REMOTE_SERVER || !auth.authenticated) return;
-  try {
-    const response = await fetch("/api/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state),
-    });
-    if (response.status === 401) showLoginAgain();
-  } catch (error) {
-    console.info("공동 서버가 없어 이 기기에만 저장합니다.");
+  remotePushQueued = true;
+  if (remotePushInFlight) return;
+  remotePushInFlight = true;
+  while (remotePushQueued) {
+    remotePushQueued = false;
+    const snapshot = JSON.parse(JSON.stringify(state));
+    try {
+      const response = await fetch("/api/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(snapshot),
+      });
+      if (response.status === 401) {
+        showLoginAgain();
+        break;
+      }
+      if (response.ok) {
+        const result = await response.json();
+        if (result?.state && state.updatedAt <= snapshot.updatedAt) applyRemoteState(result.state, false);
+        else if (state.updatedAt > snapshot.updatedAt) remotePushQueued = true;
+      }
+    } catch (error) {
+      remotePushQueued = true;
+      connectionAvailable = false;
+      if (auth.authenticated) render();
+      console.info("인터넷이 연결되면 변경사항을 다시 공유합니다.");
+      break;
+    }
   }
+  remotePushInFlight = false;
 }
 
 async function initRemoteSync() {
@@ -268,6 +439,7 @@ async function initRemoteSync() {
     const response = await fetch("/api/state");
     if (response.status === 401) return showLoginAgain();
     if (!response.ok) return;
+    connectionAvailable = true;
     const remote = await response.json();
     if (remote?.state && (!HAD_SAVED_STATE || remote.state.updatedAt > state.updatedAt)) {
       applyRemoteState(remote.state, false);
@@ -275,15 +447,39 @@ async function initRemoteSync() {
       pushRemoteState();
     }
 
+    refreshNotificationSummary();
+
     if (remoteStream) remoteStream.close();
     remoteStream = new EventSource("/api/events");
+    remoteStream.addEventListener("open", () => {
+      if (!connectionAvailable) {
+        connectionAvailable = true;
+        render();
+      }
+    });
+    remoteStream.addEventListener("error", () => {
+      if (connectionAvailable) {
+        connectionAvailable = false;
+        render();
+      }
+    });
     remoteStream.addEventListener("state", (event) => {
       const incoming = JSON.parse(event.data);
       if (incoming.clientId === state.clientId || incoming.updatedAt <= state.updatedAt) return;
       applyRemoteState(incoming, true);
     });
   } catch (error) {
+    connectionAvailable = false;
+    if (auth.authenticated) render();
     console.info("공동 서버 연결 없이 로컬 모드로 시작합니다.");
+  }
+}
+
+function refreshNotificationSummary() {
+  const summary = buildNotificationSummary();
+  if (jsonChanged(summary, state.notificationSummary)) {
+    state.notificationSummary = summary;
+    saveState();
   }
 }
 
@@ -304,10 +500,20 @@ async function initializeSession() {
     const response = await fetch("/api/session", { cache: "no-store" });
     auth.ready = true;
     auth.authenticated = response.ok;
+    connectionAvailable = true;
+    if (response.ok) localStorage.removeItem(DEVICE_LOGGED_OUT_KEY);
     render();
-    if (response.ok) initRemoteSync();
+    if (response.ok) {
+      await flushPendingReplacement();
+      initRemoteSync();
+      syncPushMember();
+    }
   } catch {
-    auth = { ready: true, authenticated: false, error: "서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요." };
+    connectionAvailable = false;
+    const mayUseLocalCopy = localStorage.getItem(DEVICE_LOGGED_OUT_KEY) !== "1" && Boolean(localStorage.getItem(STORAGE_KEY));
+    auth = mayUseLocalCopy
+      ? { ready: true, authenticated: true, error: "" }
+      : { ready: true, authenticated: false, error: "서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요." };
     render();
   }
 }
@@ -319,6 +525,129 @@ function applyRemoteState(incoming, announce) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   render();
   if (announce) toast("상대방의 변경사항이 바로 반영됐어요.");
+}
+
+function pushStatusText() {
+  if (!USE_REMOTE_SERVER) return "배포된 주소에서 알림을 연결할 수 있어요.";
+  if (pushInfo.permission === "denied") return "브라우저 설정에서 이 사이트의 알림 권한을 다시 허용해 주세요.";
+  if (!pushInfo.supported) return "이 브라우저에서는 푸시 알림을 사용할 수 없어요. 홈 화면에 설치한 뒤 다시 확인해 주세요.";
+  if (pushInfo.enabled) return `오전 ${state.household.morningAlert} 요약과 저녁 남은 일 알림을 받아요.`;
+  return "한 번만 허용하면 앱을 닫아도 정한 시각에 알려드려요.";
+}
+
+async function registerAppWorker() {
+  if (!USE_REMOTE_SERVER || !("serviceWorker" in navigator)) return;
+  try {
+    serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js");
+    serviceWorkerRegistration = await navigator.serviceWorker.ready;
+    pushInfo.supported = "PushManager" in window && typeof Notification !== "undefined";
+    pushInfo.permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+    await refreshPushInfo();
+  } catch (error) {
+    pushInfo.supported = false;
+    console.info("오프라인 기능을 준비하지 못했습니다.", error);
+  }
+}
+
+async function refreshPushInfo(shouldRender = true) {
+  if (!serviceWorkerRegistration || !pushInfo.supported) return;
+  try {
+    const subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+    pushInfo.enabled = Boolean(subscription);
+    pushInfo.permission = Notification.permission;
+  } catch {
+    pushInfo.enabled = false;
+  }
+  if (shouldRender && auth.authenticated) render();
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replaceAll("-", "+").replaceAll("_", "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((character) => character.charCodeAt(0)));
+}
+
+async function syncPushMember() {
+  if (!serviceWorkerRegistration || !auth.authenticated) return;
+  const subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+  if (!subscription) return;
+  try {
+    await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON(), memberId: state.currentMember }),
+    });
+  } catch {}
+}
+
+async function enablePushNotifications() {
+  if (pushInfo.loading || !pushInfo.supported || !serviceWorkerRegistration) return;
+  pushInfo.loading = true;
+  render();
+  try {
+    const permission = await Notification.requestPermission();
+    pushInfo.permission = permission;
+    if (permission !== "granted") throw new Error("permission_denied");
+    const configResponse = await fetch("/api/push/config", { cache: "no-store" });
+    const config = await configResponse.json();
+    if (!configResponse.ok || !config.enabled || !config.publicKey) throw new Error("push_unavailable");
+    let subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await serviceWorkerRegistration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(config.publicKey),
+      });
+    }
+    const response = await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON(), memberId: state.currentMember }),
+    });
+    if (!response.ok) throw new Error("subscribe_failed");
+    pushInfo.enabled = true;
+    toast("이 기기에서 알림을 받을 수 있어요.");
+  } catch (error) {
+    toast(error.message === "permission_denied" ? "알림 권한이 허용되지 않았어요." : "알림을 연결하지 못했어요. 잠시 후 다시 시도해 주세요.");
+  } finally {
+    pushInfo.loading = false;
+    render();
+  }
+}
+
+async function disablePushNotifications() {
+  if (!serviceWorkerRegistration) return;
+  const subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+  if (!subscription) return refreshPushInfo();
+  try {
+    await fetch("/api/push/unsubscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: subscription.endpoint }),
+    });
+    await subscription.unsubscribe();
+    pushInfo.enabled = false;
+    render();
+    toast("이 기기의 알림을 껐어요.");
+  } catch {
+    toast("알림을 끄지 못했어요. 잠시 후 다시 시도해 주세요.");
+  }
+}
+
+async function testPushNotification() {
+  if (!serviceWorkerRegistration) return;
+  const subscription = await serviceWorkerRegistration.pushManager.getSubscription();
+  if (!subscription) return toast("먼저 알림을 켜주세요.");
+  try {
+    const response = await fetch("/api/push/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint: subscription.endpoint }),
+    });
+    toast(response.ok ? "시험 알림을 보냈어요." : "시험 알림을 보내지 못했어요.");
+  } catch {
+    toast("인터넷 연결을 확인해 주세요.");
+  }
 }
 
 function allTasks() {
@@ -432,6 +761,16 @@ function dueTasks() {
     .filter((task) => task.active)
     .map((task) => ({ task, status: getTaskStatus(task) }))
     .filter(({ status }) => ["overdue", "due", "available"].includes(status.key));
+}
+
+function buildNotificationSummary() {
+  const due = dueTasks();
+  return {
+    date: operationalDate(),
+    remaining: due.length,
+    overdue: due.filter(({ status }) => status.key === "overdue").length,
+    titles: due.slice(0, 3).map(({ task }) => task.title),
+  };
 }
 
 function eventsToday() {
@@ -623,6 +962,7 @@ function renderTopbar() {
         <span class="brand-copy"><small>Our little home</small><strong>도란도란</strong></span>
       </button>
       <div class="topbar-actions">
+        ${connectionAvailable ? "" : `<span class="offline-pill">오프라인 · 기기에 저장 중</span>`}
         <div class="member-switch" aria-label="현재 사용자 선택">
           <button class="${state.currentMember === "wife" ? "active" : ""}" data-member="wife"><span class="avatar">${wifeName.slice(0, 1)}</span><span>${wifeName}</span></button>
           <button class="${state.currentMember === "husband" ? "active" : ""}" data-member="husband"><span class="avatar husband">${husbandName.slice(0, 1)}</span><span>${husbandName}</span></button>
@@ -666,7 +1006,11 @@ function renderPage() {
 }
 
 function renderShopping() {
-  const items = [...state.shoppingItems].sort((a, b) => Number(a.checked) - Number(b.checked) || new Date(a.createdAt) - new Date(b.createdAt));
+  const categoryOrder = Object.keys(SHOPPING_CATEGORIES);
+  const items = [...state.shoppingItems].sort((a, b) =>
+    Number(a.checked) - Number(b.checked)
+    || categoryOrder.indexOf(a.category || "other") - categoryOrder.indexOf(b.category || "other")
+    || new Date(a.createdAt) - new Date(b.createdAt));
   const remaining = items.filter((item) => !item.checked).length;
   const bought = items.length - remaining;
   return `
@@ -676,8 +1020,13 @@ function renderShopping() {
         ${bought ? `<button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}
       </header>
       <section class="shopping-panel">
+        <div class="quick-shopping">
+          <div><strong>자주 사는 것</strong><span>한 번 눌러 바로 추가해요</span></div>
+          <div class="quick-shopping-chips">${QUICK_SHOPPING_ITEMS.map((item) => `<button class="quick-shopping-chip" data-action="shopping-quick-add" data-name="${escapeHtml(item.name)}" data-category="${item.category}">+ ${escapeHtml(item.name)}</button>`).join("")}</div>
+        </div>
         <form id="shopping-form" class="shopping-form">
           <label class="shopping-name"><span class="sr-only">살 품목</span><input class="form-control" name="name" maxlength="60" placeholder="무엇을 살까요?" autocomplete="off" required></label>
+          <label><span class="sr-only">분류</span><select class="form-control" name="category">${Object.entries(SHOPPING_CATEGORIES).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></label>
           <label><span class="sr-only">수량 또는 메모</span><input class="form-control" name="detail" maxlength="60" placeholder="수량·메모 (선택)" autocomplete="off"></label>
           <button class="btn primary" type="submit">목록에 추가</button>
         </form>
@@ -686,8 +1035,9 @@ function renderShopping() {
           <article class="shopping-row ${item.checked ? "checked" : ""}">
             <button class="shopping-check" data-action="shopping-toggle" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} ${item.checked ? "다시 살 것으로 표시" : "구매 완료"}" aria-pressed="${item.checked}">${item.checked ? "✓" : ""}</button>
             <button class="shopping-content" data-action="shopping-toggle" data-shopping-id="${item.id}">
-              <strong>${escapeHtml(item.name)}</strong>
-              <span>${item.detail ? escapeHtml(item.detail) : `${escapeHtml(nameFor(item.addedBy))}이(가) 추가`}${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
+              <span class="shopping-title-line"><strong>${escapeHtml(item.name)}</strong><em>${SHOPPING_CATEGORIES[item.category] || SHOPPING_CATEGORIES.other}</em></span>
+              ${item.detail ? `<span class="shopping-detail">${escapeHtml(item.detail)}</span>` : ""}
+              <span class="shopping-meta">${escapeHtml(nameFor(item.addedBy))}이(가) 추가${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
             </button>
             <button class="shopping-delete" data-action="shopping-delete" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 삭제">×</button>
           </article>`).join("")}</div>` : `<div class="shopping-empty"><span>🛒</span><strong>아직 장볼 것이 없어요</strong><p>우유, 기저귀처럼 생각난 순간 바로 적어두세요.</p></div>`}
@@ -923,34 +1273,239 @@ function renderAllTasks() {
   `;
 }
 
+function historyTrackingStartDate() {
+  return operationalDate(state.startedAt || Date.now());
+}
+
+function eventsOnDate(dateKey, eventTypes = ["completed", "not_needed", "postponed"]) {
+  return state.events
+    .filter((event) => eventTypes.includes(event.eventType) && operationalDate(event.createdAt) === dateKey)
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+}
+
+function lastResetBeforeDate(taskId, dateKey) {
+  return state.events
+    .filter((event) => {
+      if (event.taskId !== taskId || !["baseline", "completed", "not_needed"].includes(event.eventType)) return false;
+      const eventDate = operationalDate(event.createdAt);
+      return event.eventType === "baseline" ? eventDate <= dateKey : eventDate < dateKey;
+    })
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
+}
+
+function conditionalWasOpenOnDate(taskId, dateKey) {
+  const latest = state.events
+    .filter((event) => event.taskId === taskId && ["triggered", "completed"].includes(event.eventType) && operationalDate(event.createdAt) <= dateKey)
+    .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0];
+  return latest?.eventType === "triggered";
+}
+
+function taskExistedOnDate(task, dateKey) {
+  const firstBaseline = state.events
+    .filter((event) => event.taskId === task.id && event.eventType === "baseline")
+    .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt))[0];
+  if (task.id.startsWith("custom-") && firstBaseline && operationalDate(firstBaseline.createdAt) > dateKey) return false;
+  return dateKey >= historyTrackingStartDate();
+}
+
+function historicalTaskExpectation(task, dateKey) {
+  if (!task.active || !taskExistedOnDate(task, dateKey)) return null;
+  if (task.recurrence === "conditional") {
+    return conditionalWasOpenOnDate(task.id, dateKey) ? { key: "due", label: "사용 기록으로 필요한 일" } : null;
+  }
+  if (task.recurrence === "daily") return { key: "due", label: "매일 하는 일" };
+
+  const last = lastResetBeforeDate(task.id, dateKey);
+  if (!last) return { key: "due", label: "완료 기록이 없던 일" };
+  const lastDate = operationalDate(last.createdAt);
+  const age = Math.round((dateKeyToUtc(dateKey) - dateKeyToUtc(lastDate)) / DAY_MS);
+
+  if (task.recurrence === "window") {
+    if (age < Number(task.maxDays || 3)) return null;
+    return { key: age > Number(task.maxDays || 3) ? "overdue" : "due", label: age > Number(task.maxDays || 3) ? `${age - Number(task.maxDays || 3)}일 밀려 있던 일` : "그날 권장된 일" };
+  }
+  if (task.recurrence === "monthly") {
+    const dueDate = new Date(last.createdAt);
+    dueDate.setMonth(dueDate.getMonth() + 1);
+    const dueKey = operationalDate(dueDate.getTime());
+    if (dateKey < dueKey) return null;
+    const overdueDays = Math.round((dateKeyToUtc(dateKey) - dateKeyToUtc(dueKey)) / DAY_MS);
+    return { key: overdueDays > 0 ? "overdue" : "due", label: overdueDays > 0 ? `${overdueDays}일 밀려 있던 일` : "그날 권장된 일" };
+  }
+
+  const interval = Number(task.intervalDays || 7);
+  if (age < interval) return null;
+  return { key: age > interval ? "overdue" : "due", label: age > interval ? `${age - interval}일 밀려 있던 일` : "그날 권장된 일" };
+}
+
+function historyDayData(dateKey) {
+  const dayEvents = eventsOnDate(dateKey);
+  const completed = dayEvents.filter((event) => event.eventType === "completed");
+  const checked = dayEvents.filter((event) => event.eventType === "not_needed");
+  const postponed = dayEvents.filter((event) => event.eventType === "postponed");
+  const handledTaskIds = new Set([...completed, ...checked].map((event) => event.taskId));
+  const postponedTaskIds = new Set(postponed.map((event) => event.taskId));
+  const missed = allTasks()
+    .map((task) => {
+      const wasPostponed = postponedTaskIds.has(task.id);
+      return { task, expectation: historicalTaskExpectation(task, dateKey) || (wasPostponed ? { key: "postponed", label: "내일 하기로 한 일" } : null), postponed: wasPostponed };
+    })
+    .filter(({ task, expectation }) => expectation && !handledTaskIds.has(task.id));
+  return { completed, checked, postponed, missed };
+}
+
+function shiftMonthKey(monthKey, amount) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const date = new Date(year, month - 1 + amount, 1, 12);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthDays(monthKey) {
+  const [year, month] = monthKey.split("-").map(Number);
+  const first = new Date(year, month - 1, 1, 12);
+  const count = new Date(year, month, 0, 12).getDate();
+  return {
+    leading: first.getDay(),
+    dates: Array.from({ length: count }, (_, index) => localDateKey(new Date(year, month - 1, index + 1, 12))),
+  };
+}
+
+function formatHistoryMonth(monthKey) {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(new Date(year, month - 1, 1, 12));
+}
+
+function moveHistoryMonth(amount) {
+  const startMonth = historyTrackingStartDate().slice(0, 7);
+  const currentMonth = operationalDate().slice(0, 7);
+  const targetMonth = shiftMonthKey(ui.historyMonth, amount);
+  if (targetMonth < startMonth || targetMonth > currentMonth) return;
+  const preferredDay = Number(ui.historyDate.slice(-2));
+  const availableDates = monthDays(targetMonth).dates;
+  let selected = availableDates[Math.min(preferredDay, availableDates.length) - 1];
+  if (selected > operationalDate()) selected = operationalDate();
+  if (selected < historyTrackingStartDate()) selected = historyTrackingStartDate();
+  ui.historyMonth = targetMonth;
+  ui.historyDate = selected;
+  render();
+}
+
+function selectHistoryDate(dateKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || dateKey > operationalDate() || dateKey < historyTrackingStartDate()) return;
+  ui.historyDate = dateKey;
+  ui.historyMonth = dateKey.slice(0, 7);
+  render();
+}
+
+function selectHistoryToday() {
+  ui.historyDate = operationalDate();
+  ui.historyMonth = ui.historyDate.slice(0, 7);
+  render();
+}
+
+function renderHistoryCalendar() {
+  const today = operationalDate();
+  const startMonth = historyTrackingStartDate().slice(0, 7);
+  const currentMonth = today.slice(0, 7);
+  if (ui.historyMonth < startMonth) ui.historyMonth = startMonth;
+  if (ui.historyMonth > currentMonth) ui.historyMonth = currentMonth;
+  const calendar = monthDays(ui.historyMonth);
+  const weekdays = ["일", "월", "화", "수", "목", "금", "토"];
+  return `
+    <section class="history-calendar-card" aria-label="날짜 선택 달력">
+      <div class="history-calendar-heading">
+        <button class="calendar-arrow" data-action="history-prev-month" aria-label="이전 달" ${ui.historyMonth <= startMonth ? "disabled" : ""}>‹</button>
+        <strong>${formatHistoryMonth(ui.historyMonth)}</strong>
+        <button class="calendar-arrow" data-action="history-next-month" aria-label="다음 달" ${ui.historyMonth >= currentMonth ? "disabled" : ""}>›</button>
+      </div>
+      <div class="history-weekdays">${weekdays.map((day) => `<span>${day}</span>`).join("")}</div>
+      <div class="history-calendar-grid">
+        ${Array.from({ length: calendar.leading }, () => `<span class="calendar-blank"></span>`).join("")}
+        ${calendar.dates.map((dateKey) => {
+          const beforeStart = dateKey < historyTrackingStartDate();
+          const future = dateKey > today;
+          const data = beforeStart || future ? { completed: [], checked: [], missed: [] } : historyDayData(dateKey);
+          const doneCount = data.completed.length + data.checked.length;
+          const day = Number(dateKey.slice(-2));
+          const selected = dateKey === ui.historyDate;
+          const labelParts = [`${Number(dateKey.slice(5, 7))}월 ${day}일`];
+          if (doneCount) labelParts.push(`기록 ${doneCount}개`);
+          if (data.missed.length) labelParts.push(`하지 않은 일 ${data.missed.length}개`);
+          return `<button class="history-calendar-day ${selected ? "selected" : ""} ${dateKey === today ? "today" : ""}" data-action="history-select-date" data-date="${dateKey}" aria-label="${labelParts.join(", ")}" ${beforeStart || future ? "disabled" : ""}>
+            <span>${day}</span>
+            <i>${doneCount ? `<b class="done-dot"></b>` : ""}${data.missed.length ? `<b class="missed-dot"></b>` : ""}</i>
+          </button>`;
+        }).join("")}
+      </div>
+      <div class="history-calendar-footer">
+        <span><i class="done-dot"></i> 확인한 기록</span><span><i class="missed-dot"></i> 하지 않은 일</span>
+        <button class="calendar-today-btn" data-action="history-today">오늘</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderHistoryEvent(event) {
+  const task = getTask(event.taskId);
+  if (!task) return "";
+  const isChecked = event.eventType === "not_needed";
+  const memberText = isChecked
+    ? `${escapeHtml(subjectName(event.memberId))} 확인 · 아직 괜찮음`
+    : `${escapeHtml(subjectName(event.memberId))} 완료`;
+  return `<article class="history-row">
+    <div class="history-check ${isChecked ? "not-needed" : ""}">${isChecked ? "○" : "✓"}</div>
+    <div><h3>${escapeHtml(task.title)}</h3><p>${memberText} · ${formatTime(event.createdAt)}${event.note ? ` · ${escapeHtml(event.note)}` : ""}</p></div>
+    <div class="history-action"><span class="row-status">${task.estimate}분</span><button class="btn ghost danger" data-action="undo-event" data-event="${event.id}">취소</button></div>
+  </article>`;
+}
+
 function renderHistory() {
-  const visibleEvents = state.events
-    .filter((event) => ["completed", "not_needed"].includes(event.eventType))
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const grouped = visibleEvents.reduce((groups, event) => {
-    const key = operationalDate(event.createdAt);
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(event);
-    return groups;
-  }, {});
+  const today = operationalDate();
+  ui.historyDate = ui.historyDate > today ? today : ui.historyDate;
+  ui.historyDate = ui.historyDate < historyTrackingStartDate() ? historyTrackingStartDate() : ui.historyDate;
+  const data = historyDayData(ui.historyDate);
+  const isToday = ui.historyDate === today;
+  const handledCount = data.completed.length + data.checked.length;
+  const hasResettable = handledCount || data.postponed.length;
 
   return `
-    <div class="inner-page">
-      <header class="inner-header"><div><p class="eyebrow">함께 쌓인 수고</p><h1>기록</h1><p>누가 언제 했는지 확인하고, 실수한 완료는 되돌릴 수 있어요.</p></div></header>
-      ${Object.keys(grouped).length ? Object.entries(grouped).map(([date, events]) => `
-        <section class="history-group">
-          <div class="history-date-row"><h2 class="history-date">${formatHistoryDate(date)}</h2><button class="reset-today-btn" data-action="reset-date" data-date="${date}">↶ 이날 체크 초기화</button></div>
-          <div class="history-list">${events.map((event) => {
-            const task = getTask(event.taskId);
-            if (!task) return "";
-            return `<article class="history-row">
-              <div class="history-check ${event.eventType === "not_needed" ? "not-needed" : ""}">${event.eventType === "not_needed" ? "○" : "✓"}</div>
-              <div><h3>${escapeHtml(task.title)}</h3><p>${event.eventType === "not_needed" ? `${escapeHtml(nameFor(event.memberId))}이(가) 점검 · 아직 괜찮음` : `${escapeHtml(nameFor(event.memberId))}${event.memberId === "together" ? " " : "이(가) "}완료`} · ${formatTime(event.createdAt)}${event.note ? ` · ${escapeHtml(event.note)}` : ""}</p></div>
-              <div class="history-action"><span class="row-status">${task.estimate}분</span><button class="btn ghost danger" data-action="undo-event" data-event="${event.id}">취소</button></div>
-            </article>`;
-          }).join("")}</div>
+    <div class="inner-page history-page">
+      <header class="inner-header"><div><p class="eyebrow">함께 쌓인 하루</p><h1>날짜별 기록</h1><p>날짜를 고르면 누가 무엇을 했고, 그날 하지 못한 일은 무엇인지 볼 수 있어요.</p></div></header>
+      <div class="history-layout">
+        ${renderHistoryCalendar()}
+        <section class="history-day-panel">
+          <div class="history-day-heading">
+            <div><p class="eyebrow">${isToday ? "오늘" : "선택한 날"}</p><h2>${formatHistoryDate(ui.historyDate)}</h2></div>
+            ${hasResettable ? `<button class="reset-today-btn" data-action="reset-date" data-date="${ui.historyDate}">↶ 이날 기록 초기화</button>` : ""}
+          </div>
+          <div class="history-summary-cards">
+            <div><strong>${data.completed.length}</strong><span>완료</span></div>
+            <div><strong>${data.checked.length}</strong><span>점검</span></div>
+            <div class="missed"><strong>${data.missed.length}</strong><span>${isToday ? "아직 안 함" : "하지 않음"}</span></div>
+          </div>
+
+          <section class="history-detail-section">
+            <div class="history-detail-title"><h3>완료한 일</h3><span>누가 했는지 함께 보여드려요</span></div>
+            ${data.completed.length ? `<div class="history-list">${data.completed.map(renderHistoryEvent).join("")}</div>` : `<div class="history-mini-empty">${isToday ? "아직 완료한 일이 없어요." : "완료 기록이 없어요."}</div>`}
+          </section>
+
+          ${data.checked.length ? `<section class="history-detail-section">
+            <div class="history-detail-title"><h3>확인한 일</h3><span>‘아직 괜찮음’으로 점검했어요</span></div>
+            <div class="history-list">${data.checked.map(renderHistoryEvent).join("")}</div>
+          </section>` : ""}
+
+          <section class="history-detail-section missed-section">
+            <div class="history-detail-title"><h3>${isToday ? "아직 하지 않은 일" : "하지 않았던 일"}</h3><span>그날 주기가 실제로 돌아온 일만 보여줘요</span></div>
+            ${data.missed.length ? `<div class="history-list">${data.missed.map(({ task, expectation, postponed }) => `
+              <article class="history-row missed-row">
+                <div class="history-check missed">!</div>
+                <div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(expectation.label)} · ${recurrenceLabel(task)}</p></div>
+                <span class="history-missed-label ${postponed ? "postponed" : ""}">${postponed ? "내일로 넘김" : isToday ? "아직 미완료" : "완료 기록 없음"}</span>
+              </article>
+            `).join("")}</div>` : `<div class="history-all-done"><span>✓</span><div><strong>${isToday ? "현재까지 놓친 일이 없어요" : "그날 할 일을 모두 확인했어요"}</strong><p>작은 수고가 차곡차곡 기록되어 있어요.</p></div></div>`}
+          </section>
         </section>
-      `).join("") : `<div class="empty-state"><strong>아직 기록이 없어요</strong>오늘 화면에서 첫 집안일을 완료해 보세요.</div>`}
+      </div>
     </div>
   `;
 }
@@ -987,6 +1542,13 @@ function renderSettings() {
           <div><h3>두 사람의 이름</h3><p>앱 곳곳의 완료자와 맡은 사람 표시에 사용해요.</p></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><label class="field-label">첫 번째 사람<input class="form-control" data-setting="wifeName" value="${escapeHtml(state.household.wifeName)}"></label><label class="field-label">두 번째 사람<input class="form-control" data-setting="husbandName" value="${escapeHtml(state.household.husbandName)}"></label></div>
         </div>
+        <div class="setting-row">
+          <div><h3>이 휴대폰의 기본 사용자</h3><p>앱을 다시 열어도 이 사람으로 시작해요. 위쪽 이름을 눌러 잠시 바꿀 수도 있어요.</p></div>
+          <div class="device-member-choice">
+            <button class="btn ${state.currentMember === "wife" ? "primary" : ""}" data-action="set-device-member" data-member-id="wife">${escapeHtml(nameFor("wife"))}</button>
+            <button class="btn ${state.currentMember === "husband" ? "primary" : ""}" data-action="set-device-member" data-member-id="husband">${escapeHtml(nameFor("husband"))}</button>
+          </div>
+        </div>
       </section>
       <section class="settings-section">
         <h2>근무 일정</h2>
@@ -1002,12 +1564,19 @@ function renderSettings() {
           <div class="time-pair"><label class="field-label">출근<input type="time" class="form-control" data-work-member="husband" data-work-field="start" value="${husbandSchedule.start}"></label><span>→</span><label class="field-label">퇴근<input type="time" class="form-control" data-work-member="husband" data-work-field="end" value="${husbandSchedule.end}"></label></div>
         </div>
         <div class="setting-row offday-setting">
-          <div><h3>${escapeHtml(nameFor("husband"))} 변동 휴무</h3><p>앞으로 2주 중 쉬는 날을 눌러주세요. 초록색 날짜가 휴무예요.</p></div>
-          <div class="offday-grid">${upcomingDates().map((date) => {
+          <div><h3>${escapeHtml(nameFor("husband"))} 변동 휴무</h3><p>앞으로 5주 중 쉬는 날을 눌러주세요. 초록색 날짜가 휴무예요.</p></div>
+          <div class="offday-calendar-wrap">
+            <div class="offday-calendar-actions"><span>앞으로 5주</span><button class="btn ghost" data-action="copy-days-off">이번 주 휴무를 다음 주에 복사</button></div>
+            <div class="offday-weekdays">${weekdayNames.map((day) => `<span>${day}</span>`).join("")}</div>
+            <div class="offday-grid">
+              ${Array.from({ length: new Date().getDay() }, () => `<span class="offday-blank"></span>`).join("")}
+              ${upcomingDates(35).map((date) => {
             const key = localDateKey(date);
             const active = (husbandSchedule.daysOff || []).includes(key);
             return `<button class="offday-btn ${active ? "active" : ""}" data-action="toggle-day-off" data-date="${key}"><small>${weekdayNames[date.getDay()]}</small><strong>${date.getMonth() + 1}/${date.getDate()}</strong></button>`;
-          }).join("")}</div>
+              }).join("")}
+            </div>
+          </div>
         </div>
       </section>
       <section class="settings-section">
@@ -1024,6 +1593,18 @@ function renderSettings() {
           <div><h3>저녁 확인</h3><p>밀린 일이 있을 때만 알려주는 시각이에요.</p></div>
           <input type="time" class="form-control" data-setting="eveningAlert" value="${state.household.eveningAlert}">
         </div>
+        <div class="setting-row">
+          <div><h3>이 기기 푸시 알림</h3><p>${pushStatusText()}</p></div>
+          <div class="notification-actions">
+            ${pushInfo.enabled
+              ? `<button class="btn" data-action="push-test">시험 알림</button><button class="btn danger" data-action="push-disable">알림 끄기</button>`
+              : `<button class="btn primary" data-action="push-enable" ${!pushInfo.supported || pushInfo.loading ? "disabled" : ""}>${pushInfo.loading ? "연결 중…" : "알림 켜기"}</button>`}
+          </div>
+        </div>
+        <div class="setting-row">
+          <div><h3>서로의 완료 알림</h3><p>상대가 맡기나 완료를 기록했을 때 알려줘요. 부담스러우면 꺼두세요.</p></div>
+          <label class="toggle" style="justify-self:end"><input type="checkbox" data-setting-toggle="partnerAlerts" ${state.household.partnerAlerts ? "checked" : ""}><span></span></label>
+        </div>
       </section>
       <section class="settings-section">
         <h2>표시 방법</h2>
@@ -1039,6 +1620,17 @@ function renderSettings() {
           <button class="btn" data-action="logout">이 기기 로그아웃</button>
         </div>
       </section>` : ""}
+      <section class="settings-section">
+        <h2>데이터 보관</h2>
+        <div class="setting-row">
+          <div><h3>자동 백업과 직접 보관</h3><p>서버에는 하루 한 번 최근 31일을 자동 보관해요. 파일로 내려받아 휴대폰이나 드라이브에도 따로 보관할 수 있어요.</p></div>
+          <div class="data-actions">
+            <button class="btn" data-action="data-export">백업 내려받기</button>
+            <button class="btn" data-action="data-import">백업 불러오기</button>
+            <input id="backup-import-input" type="file" accept="application/json,.json" hidden>
+          </div>
+        </div>
+      </section>
       <section class="danger-zone">
         <div><h3>처음 상태로 되돌리기</h3><p>공유된 완료 기록, 장보기 목록과 설정을 모두 지워요.</p></div>
         <button class="btn danger" data-action="reset">모든 기록 초기화</button>
@@ -1091,7 +1683,14 @@ function renderTaskModal() {
 }
 
 function renderAlertsModal() {
-  const content = `<div><p class="sidebar-text" style="font-size:12px;margin-top:0">알림은 집안일마다 울리지 않아요. 오전 ${state.household.morningAlert}에 오늘 할 일을 한 번 요약하고, 저녁 ${state.household.eveningAlert}에는 밀린 일이 있을 때만 알려드리는 방식으로 준비되어 있어요.</p><p class="sidebar-text" style="font-size:12px">현재 버전은 알림 시각만 저장합니다. 실제 푸시 알림은 서버 연결 후 사용할 수 있어요.</p><div class="modal-actions"><button class="btn primary" data-action="modal-close">확인</button></div></div>`;
+  const content = `<div>
+    <p class="sidebar-text" style="font-size:12px;margin-top:0">집안일마다 울리지 않아요. 오전 ${state.household.morningAlert}에 오늘 할 일을 한 번 요약하고, 저녁 ${state.household.eveningAlert}에는 남은 일이 있을 때만 알려드려요.</p>
+    <div class="notification-status ${pushInfo.enabled ? "enabled" : ""}"><strong>${pushInfo.enabled ? "이 기기 알림 켜짐" : "이 기기 알림 꺼짐"}</strong><span>${pushStatusText()}</span></div>
+    <div class="modal-actions">
+      ${pushInfo.enabled ? `<button class="btn" data-action="push-test">시험 알림</button><button class="btn danger" data-action="push-disable">알림 끄기</button>` : `<button class="btn primary" data-action="push-enable" ${!pushInfo.supported || pushInfo.loading ? "disabled" : ""}>알림 켜기</button>`}
+      <button class="btn" data-action="modal-close">닫기</button>
+    </div>
+  </div>`;
   return modalShell("알림은 가볍게", "집안일보다 앱이 더 부담스럽지 않도록", content);
 }
 
@@ -1108,7 +1707,9 @@ document.addEventListener("click", (event) => {
   if (memberButton) {
     state.currentMember = memberButton.dataset.member;
     ui.completionMember = state.currentMember;
+    localStorage.setItem(DEVICE_MEMBER_KEY, state.currentMember);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    syncPushMember();
     render();
     return;
   }
@@ -1156,11 +1757,23 @@ document.addEventListener("click", (event) => {
     renderModal();
     return;
   }
+  if (action === "history-prev-month") return moveHistoryMonth(-1);
+  if (action === "history-next-month") return moveHistoryMonth(1);
+  if (action === "history-select-date") return selectHistoryDate(actionButton.dataset.date);
+  if (action === "history-today") return selectHistoryToday();
   if (action === "toggle-night-day") return toggleNightDay(Number(actionButton.dataset.day));
   if (action === "toggle-day-off") return toggleDayOff(actionButton.dataset.date);
+  if (action === "copy-days-off") return copyPreviousWeekDaysOff();
+  if (action === "set-device-member") return setDeviceMember(actionButton.dataset.memberId);
+  if (action === "shopping-quick-add") return addQuickShoppingItem(actionButton.dataset.name, actionButton.dataset.category);
   if (action === "shopping-toggle") return toggleShoppingItem(actionButton.dataset.shoppingId);
   if (action === "shopping-delete") return deleteShoppingItem(actionButton.dataset.shoppingId);
   if (action === "shopping-clear-bought") return clearBoughtShoppingItems();
+  if (action === "push-enable") return enablePushNotifications();
+  if (action === "push-disable") return disablePushNotifications();
+  if (action === "push-test") return testPushNotification();
+  if (action === "data-export") return exportBackup();
+  if (action === "data-import") return document.getElementById("backup-import-input")?.click();
   if (action === "reset-today") return resetTodayChecks();
   if (action === "reset-date") return resetDateChecks(actionButton.dataset.date);
   if (action === "logout") return logout();
@@ -1171,6 +1784,12 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target;
+  if (target.id === "backup-import-input") {
+    const file = target.files?.[0];
+    if (file) importBackup(file);
+    target.value = "";
+    return;
+  }
   if (target.matches("[data-subtask]")) {
     const taskId = target.dataset.subtask;
     state.subtaskProgress[taskId] ||= {};
@@ -1228,8 +1847,11 @@ document.addEventListener("submit", async (event) => {
         return;
       }
       auth = { ready: true, authenticated: true, error: "" };
+      localStorage.removeItem(DEVICE_LOGGED_OUT_KEY);
       render();
+      await flushPendingReplacement();
       initRemoteSync();
+      syncPushMember();
     } catch {
       auth.error = "서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.";
       render();
@@ -1267,42 +1889,85 @@ function toggleClaim(taskId) {
 function addShoppingItem(form) {
   const name = String(form.get("name") || "").trim();
   const detail = String(form.get("detail") || "").trim();
+  const category = SHOPPING_CATEGORIES[form.get("category")] ? String(form.get("category")) : "other";
   if (!name) return;
-  state.shoppingItems.push({
+  addShoppingItemValues(name, detail, category);
+  requestAnimationFrame(() => document.querySelector("#shopping-form input[name='name']")?.focus());
+}
+
+function addQuickShoppingItem(name, category) {
+  addShoppingItemValues(String(name || "").trim(), "", SHOPPING_CATEGORIES[category] ? category : "other");
+}
+
+function addShoppingItemValues(name, detail, category) {
+  if (!name) return;
+  const duplicate = state.shoppingItems.find((item) => item.name.trim().toLocaleLowerCase("ko-KR") === name.toLocaleLowerCase("ko-KR"));
+  if (duplicate) {
+    if (!duplicate.checked) return toast(`${name}은(는) 이미 목록에 있어요.`);
+    const before = { ...duplicate };
+    duplicate.checked = false;
+    duplicate.checkedBy = null;
+    duplicate.checkedAt = null;
+    duplicate.category = category || duplicate.category;
+    saveState(`${name}을(를) 다시 살 목록으로 옮겼어요.`, {
+      onUndo: () => { Object.assign(duplicate, before); saveState("되돌렸어요."); },
+    });
+    return;
+  }
+  const item = {
     id: `shopping-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: name.slice(0, 60),
     detail: detail.slice(0, 60),
+    category,
     checked: false,
     addedBy: state.currentMember,
     checkedBy: null,
     createdAt: new Date().toISOString(),
     checkedAt: null,
+    updatedAt: Date.now(),
+  };
+  state.shoppingItems.push(item);
+  saveState(`${name}을(를) 장보기 목록에 추가했어요.`, {
+    onUndo: () => {
+      state.shoppingItems = state.shoppingItems.filter((entry) => entry.id !== item.id);
+      saveState("추가를 되돌렸어요.");
+    },
   });
-  saveState(`${name}을(를) 장보기 목록에 추가했어요.`);
-  requestAnimationFrame(() => document.querySelector("#shopping-form input[name='name']")?.focus());
 }
 
 function toggleShoppingItem(itemId) {
   const item = state.shoppingItems.find((entry) => entry.id === itemId);
   if (!item) return;
+  const before = { ...item };
   item.checked = !item.checked;
   item.checkedBy = item.checked ? state.currentMember : null;
   item.checkedAt = item.checked ? new Date().toISOString() : null;
-  saveState(item.checked ? `${item.name}, 장바구니에 담았어요.` : `${item.name}을(를) 다시 살 목록으로 옮겼어요.`);
+  saveState(item.checked ? `${item.name}, 장바구니에 담았어요.` : `${item.name}을(를) 다시 살 목록으로 옮겼어요.`, {
+    onUndo: () => { Object.assign(item, before); saveState("장보기 체크를 되돌렸어요."); },
+  });
 }
 
 function deleteShoppingItem(itemId) {
   const item = state.shoppingItems.find((entry) => entry.id === itemId);
   if (!item) return;
+  const index = state.shoppingItems.indexOf(item);
   state.shoppingItems = state.shoppingItems.filter((entry) => entry.id !== itemId);
-  saveState(`${item.name}을(를) 목록에서 지웠어요.`);
+  saveState(`${item.name}을(를) 목록에서 지웠어요.`, {
+    onUndo: () => {
+      state.shoppingItems.splice(Math.min(index, state.shoppingItems.length), 0, item);
+      saveState("삭제를 되돌렸어요.");
+    },
+  });
 }
 
 function clearBoughtShoppingItems() {
-  const bought = state.shoppingItems.filter((item) => item.checked).length;
-  if (!bought) return;
+  const removed = state.shoppingItems.filter((item) => item.checked);
+  const bought = removed.length;
+  if (!removed.length) return;
   state.shoppingItems = state.shoppingItems.filter((item) => !item.checked);
-  saveState(`구매한 품목 ${bought}개를 정리했어요.`);
+  saveState(`구매한 품목 ${bought}개를 정리했어요.`, {
+    onUndo: () => { state.shoppingItems.push(...removed); saveState("정리를 되돌렸어요."); },
+  });
 }
 
 function toggleNightDay(day) {
@@ -1322,6 +1987,41 @@ function toggleDayOff(date) {
   saveState(wasDayOff ? `${nameFor("husband")} 근무일로 바꿨어요.` : `${nameFor("husband")} 휴무일로 표시했어요.`);
 }
 
+function copyPreviousWeekDaysOff() {
+  const current = new Set(state.household.workSchedule.husband.daysOff || []);
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  let copied = 0;
+  for (let index = 0; index < 7; index += 1) {
+    const source = new Date(monday);
+    source.setDate(monday.getDate() + index);
+    const target = new Date(source);
+    target.setDate(source.getDate() + 7);
+    const sourceKey = localDateKey(source);
+    const targetKey = localDateKey(target);
+    current.delete(targetKey);
+    if (current.has(sourceKey)) {
+      current.add(targetKey);
+      copied += 1;
+    }
+  }
+  state.household.workSchedule.husband.daysOff = [...current].sort();
+  saveState(copied ? `이번 주 휴무 ${copied}일을 다음 주에 복사했어요.` : "이번 주에 선택한 휴무가 없어 다음 주를 비워뒀어요.");
+}
+
+function setDeviceMember(memberId) {
+  if (!["wife", "husband"].includes(memberId)) return;
+  state.currentMember = memberId;
+  ui.completionMember = memberId;
+  localStorage.setItem(DEVICE_MEMBER_KEY, memberId);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  syncPushMember();
+  render();
+  toast(`이 휴대폰은 ${nameFor(memberId)}으로 기억할게요.`);
+}
+
 function resetTodayChecks() {
   if (!hasTodayCheckState()) return;
   resetDateChecks(operationalDate());
@@ -1329,13 +2029,13 @@ function resetTodayChecks() {
 
 function resetDateChecks(date) {
   const isToday = date === operationalDate();
-  const completedCount = state.events.filter((event) => ["completed", "not_needed"].includes(event.eventType) && operationalDate(event.createdAt) === date).length;
+  const completedCount = state.events.filter((event) => ["completed", "not_needed", "postponed"].includes(event.eventType) && operationalDate(event.createdAt) === date).length;
   const message = completedCount
     ? `${isToday ? "오늘" : formatHistoryDate(date)} 체크한 ${completedCount}개 기록을 되돌릴까요?\n집안일 목록과 근무일정은 그대로 유지됩니다.`
     : "오늘의 미루기와 세부 체크를 되돌릴까요?\n집안일 목록과 근무일정은 그대로 유지됩니다.";
   if (!window.confirm(message)) return;
 
-  state.events = state.events.filter((event) => !(["completed", "not_needed"].includes(event.eventType) && operationalDate(event.createdAt) === date));
+  state.events = state.events.filter((event) => !(["completed", "not_needed", "postponed"].includes(event.eventType) && operationalDate(event.createdAt) === date));
   if (isToday) {
     state.postponed = Object.fromEntries(Object.entries(state.postponed).filter(([, value]) => value !== date && value?.hiddenOn !== date));
     state.subtaskProgress = {};
@@ -1343,41 +2043,92 @@ function resetDateChecks(date) {
   saveState(`${isToday ? "오늘" : "선택한 날"} 체크만 초기화했어요. 집안일과 설정은 그대로예요.`);
 }
 
+function captureEntry(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key)
+    ? { exists: true, value: JSON.parse(JSON.stringify(object[key])) }
+    : { exists: false, value: null };
+}
+
+function restoreEntry(object, key, captured) {
+  if (captured.exists) object[key] = captured.value;
+  else delete object[key];
+}
+
 function postponeUntilTomorrow(taskId) {
   const today = operationalDate();
+  const previous = captureEntry(state.postponed, taskId);
+  const created = {
+    id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    taskId,
+    eventType: "postponed",
+    memberId: state.currentMember,
+    createdAt: new Date().toISOString(),
+    note: dateKeyPlusDays(today, 1),
+  };
+  state.events.push(created);
   state.postponed[taskId] = { hiddenOn: today, until: dateKeyPlusDays(today, 1) };
-  saveState("내일 할 일로 미뤘어요. 내일 목록에 다시 나타나요.");
+  saveState("내일 할 일로 옮겼어요. 내일 목록에 다시 나타나요.", {
+    onUndo: () => {
+      state.events = state.events.filter((event) => event.id !== created.id);
+      restoreEntry(state.postponed, taskId, previous);
+      saveState("‘내일 하자’를 되돌렸어요.");
+    },
+  });
 }
 
 function markNotNeeded(taskId) {
-  state.events.push({
+  const previousClaim = captureEntry(state.claims, taskId);
+  const previousProgress = captureEntry(state.subtaskProgress, taskId);
+  const previousPostponed = captureEntry(state.postponed, taskId);
+  const created = {
     id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     taskId,
     eventType: "not_needed",
     memberId: state.currentMember,
     createdAt: new Date().toISOString(),
     note: "",
-  });
+  };
+  state.events.push(created);
   delete state.claims[taskId];
   delete state.subtaskProgress[taskId];
   delete state.postponed[taskId];
-  saveState("아직 괜찮다고 기록했어요. 다음 점검일부터 다시 계산할게요.");
+  saveState("아직 괜찮다고 기록했어요. 다음 점검일부터 다시 계산할게요.", {
+    onUndo: () => {
+      state.events = state.events.filter((event) => event.id !== created.id);
+      restoreEntry(state.claims, taskId, previousClaim);
+      restoreEntry(state.subtaskProgress, taskId, previousProgress);
+      restoreEntry(state.postponed, taskId, previousPostponed);
+      saveState("점검 기록을 되돌렸어요.");
+    },
+  });
 }
 
 function completeTask(taskId, memberId, note) {
-  state.events.push({
+  const previousClaim = captureEntry(state.claims, taskId);
+  const previousProgress = captureEntry(state.subtaskProgress, taskId);
+  const previousPostponed = captureEntry(state.postponed, taskId);
+  const created = {
     id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     taskId,
     eventType: "completed",
     memberId: memberId || state.currentMember,
     createdAt: new Date().toISOString(),
     note,
-  });
+  };
+  state.events.push(created);
   delete state.claims[taskId];
   delete state.subtaskProgress[taskId];
   delete state.postponed[taskId];
   closeModal(false);
-  saveState(memberId === "together" ? "함께 완료했어요. 두 분 모두 수고했어요!" : `${nameFor(memberId)}의 완료로 기록했어요.`);
+  saveState(memberId === "together" ? "함께 완료했어요. 두 분 모두 수고했어요!" : `${nameFor(memberId)}의 완료로 기록했어요.`, {
+    onUndo: () => {
+      state.events = state.events.filter((event) => event.id !== created.id);
+      restoreEntry(state.claims, taskId, previousClaim);
+      restoreEntry(state.subtaskProgress, taskId, previousProgress);
+      restoreEntry(state.postponed, taskId, previousPostponed);
+      saveState("완료를 되돌렸어요.");
+    },
+  });
 }
 
 function triggerBottle() {
@@ -1438,11 +2189,70 @@ function resetAll() {
   saveState("처음 상태로 되돌렸어요.");
 }
 
+function exportBackup() {
+  const payload = {
+    type: "doran-household-backup",
+    exportedAt: new Date().toISOString(),
+    state,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = `도란도란-백업-${localDateKey(new Date())}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("백업 파일을 내려받았어요.");
+}
+
+async function importBackup(file) {
+  try {
+    const parsed = JSON.parse(await file.text());
+    const incoming = parsed?.type === "doran-household-backup" ? parsed.state : parsed;
+    if (!incoming?.household || !Array.isArray(incoming.events)) throw new Error("invalid_backup");
+    if (!window.confirm("이 백업으로 현재 공동 기록을 바꿀까요?\n현재 상태는 오늘 자동 백업에 남아 있어요.")) return;
+    const currentMember = state.currentMember;
+    const clientId = state.clientId;
+    state = normalizeState(incoming, { currentMember, clientId, updatedAt: Date.now() });
+    state.notificationSummary = buildNotificationSummary();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(PENDING_REPLACE_KEY, JSON.stringify(state));
+    render();
+    const replaced = await flushPendingReplacement();
+    toast(replaced ? "백업을 불러와 두 기기에 반영했어요." : "백업을 불러왔어요. 인터넷이 연결되면 함께 반영할게요.");
+  } catch (error) {
+    toast("도란도란에서 만든 올바른 백업 파일인지 확인해 주세요.");
+  }
+}
+
+async function flushPendingReplacement() {
+  if (!USE_REMOTE_SERVER || !auth.authenticated || !navigator.onLine) return false;
+  const pending = localStorage.getItem(PENDING_REPLACE_KEY);
+  if (!pending) return true;
+  try {
+    const response = await fetch("/api/state/replace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: pending,
+    });
+    if (!response.ok) return false;
+    const result = await response.json();
+    localStorage.removeItem(PENDING_REPLACE_KEY);
+    if (result?.state) applyRemoteState(result.state, false);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function logout() {
   if (!window.confirm("이 기기에서 로그아웃할까요? 집안일 기록은 그대로 남아 있어요.")) return;
   try {
     await fetch("/api/logout", { method: "POST" });
   } finally {
+    localStorage.setItem(DEVICE_LOGGED_OUT_KEY, "1");
     if (remoteStream) remoteStream.close();
     remoteStream = null;
     auth = { ready: true, authenticated: false, error: "" };
@@ -1458,13 +2268,49 @@ function closeModal(shouldRender = true) {
   if (shouldRender) render();
 }
 
-function toast(message) {
+function toast(message, options = {}) {
   const root = document.getElementById("toast-root");
+  if (typeof options.onUndo === "function") root.querySelectorAll(".toast.has-action").forEach((toastNode) => toastNode.remove());
   const node = document.createElement("div");
-  node.className = "toast";
-  node.textContent = message;
+  node.className = `toast${typeof options.onUndo === "function" ? " has-action" : ""}`;
+  const text = document.createElement("span");
+  text.textContent = message;
+  node.appendChild(text);
+  if (typeof options.onUndo === "function") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = options.actionLabel || "되돌리기";
+    button.addEventListener("click", () => {
+      node.remove();
+      options.onUndo();
+    }, { once: true });
+    node.appendChild(button);
+  }
   root.appendChild(node);
-  window.setTimeout(() => node.remove(), 3100);
+  window.setTimeout(() => node.remove(), options.onUndo ? 10000 : 3100);
 }
 
+const requestedPage = new URLSearchParams(window.location.search).get("page");
+if (["today", "all", "shopping", "history", "settings"].includes(requestedPage)) ui.page = requestedPage;
+
+window.addEventListener("online", async () => {
+  connectionAvailable = true;
+  render();
+  toast("인터넷이 다시 연결됐어요. 변경사항을 맞추고 있어요.");
+  await initializeSession();
+  await flushPendingReplacement();
+  pushRemoteState();
+});
+
+window.addEventListener("offline", () => {
+  connectionAvailable = false;
+  render();
+  toast("오프라인이에요. 체크한 내용은 이 기기에 안전하게 저장할게요.");
+});
+
+registerAppWorker();
 initializeSession();
+window.setInterval(refreshNotificationSummary, 15 * 60 * 1000);
+window.setInterval(() => {
+  if (USE_REMOTE_SERVER && auth.authenticated && !connectionAvailable) initializeSession();
+}, 15 * 1000);

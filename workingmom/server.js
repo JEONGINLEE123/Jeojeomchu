@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const webpush = require("web-push");
 
 const ROOT = __dirname;
 const DATA_DIR = process.env.DORAN_DATA_DIR
@@ -11,6 +12,9 @@ const DATA_DIR = process.env.DORAN_DATA_DIR
     ? path.resolve(process.env.RAILWAY_VOLUME_MOUNT_PATH)
     : path.join(ROOT, ".data");
 const DATA_FILE = path.join(DATA_DIR, "household.json");
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const PUSH_FILE = path.join(DATA_DIR, "push-subscriptions.json");
+const VAPID_FILE = path.join(DATA_DIR, "push-keys.json");
 const PORT = Number(process.env.PORT || 4173);
 const APP_USERNAME = process.env.WORKINGMOM_USERNAME || "family";
 const APP_PASSWORD = process.env.WORKINGMOM_PASSWORD || "";
@@ -23,6 +27,7 @@ const clients = new Set();
 const loginAttempts = new Map();
 const PUBLIC_FILES = new Set([
   "/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest",
+  "/sw.js",
   "/icons/favicon-32.png", "/icons/apple-touch-icon.png", "/icons/icon-192.png",
   "/icons/icon-512.png", "/icons/icon-1024.png",
 ]);
@@ -45,9 +50,303 @@ function readState() {
   }
 }
 
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value, null, 2), "utf8");
+  fs.renameSync(temporary, file);
+}
+
+function seoulDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function ensureDailyBackup(state) {
+  if (!state) return;
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const file = path.join(BACKUP_DIR, `${seoulDateKey()}.json`);
+  if (!fs.existsSync(file)) writeJsonAtomic(file, state);
+  const backups = fs.readdirSync(BACKUP_DIR)
+    .filter((name) => /^\d{4}-\d{2}-\d{2}\.json$/.test(name))
+    .sort()
+    .reverse();
+  for (const old of backups.slice(31)) fs.unlinkSync(path.join(BACKUP_DIR, old));
+}
+
 function writeState(state) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2), "utf8");
+  ensureDailyBackup(readState() || state);
+  writeJsonAtomic(DATA_FILE, state);
+}
+
+function mergeTimestampMaps(left = {}, right = {}) {
+  const result = { ...left };
+  for (const [key, value] of Object.entries(right || {})) result[key] = Math.max(Number(result[key] || 0), Number(value || 0));
+  return result;
+}
+
+function fieldTimestamp(state, field) {
+  return Number(state?.syncMeta?.fields?.[field] || state?.updatedAt || 0);
+}
+
+function objectTimestamp(state, field, key) {
+  return Number(state?.syncMeta?.objects?.[field]?.[key] || state?.updatedAt || 0);
+}
+
+function mergeKeyedObject(current, incoming, field) {
+  const left = current?.[field] || {};
+  const right = incoming?.[field] || {};
+  const result = {};
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    const leftTime = objectTimestamp(current, field, key);
+    const rightTime = objectTimestamp(incoming, field, key);
+    const source = rightTime >= leftTime ? right : left;
+    if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = source[key];
+  }
+  return result;
+}
+
+function mergeStates(current, incoming) {
+  if (!current) return incoming;
+  const result = { ...current, ...incoming };
+
+  for (const field of ["household", "customTasks"]) {
+    result[field] = fieldTimestamp(incoming, field) >= fieldTimestamp(current, field) ? incoming[field] : current[field];
+  }
+
+  for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
+    result[field] = mergeKeyedObject(current, incoming, field);
+  }
+
+  result.deletedEventIds = mergeTimestampMaps(current.deletedEventIds, incoming.deletedEventIds);
+  const eventMap = new Map();
+  for (const event of [...(current.events || []), ...(incoming.events || [])]) eventMap.set(event.id, event);
+  result.events = [...eventMap.values()].filter((event) => !result.deletedEventIds[event.id] && event.taskId !== "laundry-batches");
+
+  result.shoppingDeletedIds = mergeTimestampMaps(current.shoppingDeletedIds, incoming.shoppingDeletedIds);
+  const shoppingMap = new Map();
+  for (const item of [...(current.shoppingItems || []), ...(incoming.shoppingItems || [])]) {
+    const existing = shoppingMap.get(item.id);
+    if (!existing || Number(item.updatedAt || 0) >= Number(existing.updatedAt || 0)) shoppingMap.set(item.id, item);
+  }
+  result.shoppingItems = [...shoppingMap.values()].filter((item) => Number(item.updatedAt || 0) > Number(result.shoppingDeletedIds[item.id] || 0));
+
+  const fields = mergeTimestampMaps(current.syncMeta?.fields, incoming.syncMeta?.fields);
+  const objects = {};
+  for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
+    objects[field] = mergeTimestampMaps(current.syncMeta?.objects?.[field], incoming.syncMeta?.objects?.[field]);
+  }
+  result.syncMeta = { fields, objects };
+  result.notificationSummary = Number(incoming.updatedAt || 0) >= Number(current.updatedAt || 0)
+    ? incoming.notificationSummary
+    : current.notificationSummary;
+  const startedAtCandidates = [current.startedAt, incoming.startedAt]
+    .filter(Boolean)
+    .sort((left, right) => new Date(left) - new Date(right));
+  result.startedAt = startedAtCandidates[0] || new Date().toISOString();
+  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 6);
+  result.clientId = incoming.clientId;
+  result.updatedAt = Math.max(Date.now(), Number(current.updatedAt || 0) + 1, Number(incoming.updatedAt || 0));
+  return result;
+}
+
+function readPushData() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PUSH_FILE, "utf8"));
+    return { subscriptions: Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [] };
+  } catch {
+    return { subscriptions: [] };
+  }
+}
+
+function writePushData(data) {
+  writeJsonAtomic(PUSH_FILE, data);
+}
+
+function configureWebPush() {
+  try {
+    let keys;
+    if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+      keys = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
+    } else {
+      try { keys = JSON.parse(fs.readFileSync(VAPID_FILE, "utf8")); } catch { keys = webpush.generateVAPIDKeys(); writeJsonAtomic(VAPID_FILE, keys); }
+    }
+    webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:workingmom@jeojeomchu.xyz", keys.publicKey, keys.privateKey);
+    return { enabled: true, publicKey: keys.publicKey };
+  } catch (error) {
+    console.warn("푸시 알림을 준비하지 못했습니다.", error.message);
+    return { enabled: false, publicKey: "" };
+  }
+}
+
+const pushConfiguration = configureWebPush();
+
+async function sendPush(record, payload) {
+  if (!pushConfiguration.enabled) return "failed";
+  try {
+    await webpush.sendNotification(record.subscription, JSON.stringify(payload), { TTL: 60 * 60 * 12 });
+    return "sent";
+  } catch (error) {
+    if (![404, 410].includes(error.statusCode)) console.warn("푸시 알림 전송 실패:", error.statusCode || error.message);
+    return [404, 410].includes(error.statusCode) ? "expired" : "failed";
+  }
+}
+
+async function sendToSubscriptions(payload, predicate = () => true) {
+  const data = readPushData();
+  const kept = [];
+  for (const record of data.subscriptions) {
+    if (!predicate(record)) {
+      kept.push(record);
+      continue;
+    }
+    const status = await sendPush(record, payload);
+    if (status !== "expired") kept.push(record);
+  }
+  if (kept.length !== data.subscriptions.length) writePushData({ subscriptions: kept });
+}
+
+function memberName(state, memberId) {
+  if (memberId === "wife") return state?.household?.wifeName || "엄마";
+  if (memberId === "husband") return state?.household?.husbandName || "아빠";
+  return "두 사람";
+}
+
+async function notifyPartnerChanges(previous, next) {
+  if (!previous || !next?.household?.partnerAlerts) return;
+  const previousEventIds = new Set((previous.events || []).map((event) => event.id));
+  const completion = (next.events || []).find((event) => event.eventType === "completed" && !previousEventIds.has(event.id));
+  if (completion && completion.memberId !== "together") {
+    await sendToSubscriptions({
+      title: "집안일을 하나 끝냈어요",
+      body: `${memberName(next, completion.memberId)}이(가) 완료했어요. 서로의 수고를 확인해 보세요.`,
+      url: "/?page=history",
+      tag: `completion-${completion.id}`,
+    }, (record) => record.memberId !== completion.memberId);
+    return;
+  }
+  for (const [taskId, claim] of Object.entries(next.claims || {})) {
+    if (claim?.claimedAt && previous.claims?.[taskId]?.claimedAt !== claim.claimedAt) {
+      await sendToSubscriptions({
+        title: "집안일을 맡았어요",
+        body: `${memberName(next, claim.memberId)}이(가) 집안일 하나를 맡았어요.`,
+        url: "/",
+        tag: `claim-${taskId}-${claim.claimedAt}`,
+      }, (record) => record.memberId !== claim.memberId);
+      break;
+    }
+  }
+}
+
+function handlePushSubscribe(request, response) {
+  readJsonBody(request, (error, body) => {
+    const subscription = body?.subscription;
+    if (error || !subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+      return sendJson(response, 400, { ok: false, error: "invalid_subscription" });
+    }
+    const data = readPushData();
+    const record = {
+      subscription,
+      memberId: ["wife", "husband"].includes(body.memberId) ? body.memberId : "wife",
+      createdAt: new Date().toISOString(),
+      lastSent: data.subscriptions.find((item) => item.subscription?.endpoint === subscription.endpoint)?.lastSent || {},
+    };
+    data.subscriptions = data.subscriptions.filter((item) => item.subscription?.endpoint !== subscription.endpoint);
+    data.subscriptions.push(record);
+    writePushData(data);
+    sendJson(response, 200, { ok: true });
+  });
+}
+
+function handlePushUnsubscribe(request, response) {
+  readJsonBody(request, (error, body) => {
+    if (error || !body?.endpoint) return sendJson(response, 400, { ok: false, error: "invalid_subscription" });
+    const data = readPushData();
+    data.subscriptions = data.subscriptions.filter((item) => item.subscription?.endpoint !== body.endpoint);
+    writePushData(data);
+    sendJson(response, 200, { ok: true });
+  });
+}
+
+function handlePushTest(request, response) {
+  readJsonBody(request, async (error, body) => {
+    if (error || !body?.endpoint) return sendJson(response, 400, { ok: false, error: "invalid_subscription" });
+    const record = readPushData().subscriptions.find((item) => item.subscription?.endpoint === body.endpoint);
+    if (!record) return sendJson(response, 404, { ok: false, error: "subscription_not_found" });
+    const status = await sendPush(record, { title: "알림이 잘 연결됐어요", body: "도란도란이 정한 시각에 가볍게 알려드릴게요.", url: "/", tag: "push-test" });
+    sendJson(response, status === "sent" ? 200 : 503, { ok: status === "sent" });
+  });
+}
+
+function seoulClock(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return { date: `${values.year}-${values.month}-${values.day}`, minutes: Number(values.hour) * 60 + Number(values.minute) };
+}
+
+function timeToMinutes(value, fallback) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || ""));
+  return match ? Number(match[1]) * 60 + Number(match[2]) : fallback;
+}
+
+let notificationCheckRunning = false;
+async function checkScheduledNotifications() {
+  if (notificationCheckRunning || !pushConfiguration.enabled) return;
+  notificationCheckRunning = true;
+  try {
+    const state = readState();
+    const data = readPushData();
+    if (!state || !data.subscriptions.length) return;
+    const clock = seoulClock();
+    const morning = timeToMinutes(state.household?.morningAlert, 9 * 60);
+    const evening = timeToMinutes(state.household?.eveningAlert, 20 * 60 + 30);
+    const summary = state.notificationSummary || {};
+    let changed = false;
+    const kept = [];
+    for (const record of data.subscriptions) {
+      record.lastSent ||= {};
+      let payload = null;
+      let kind = "";
+      const summaryIsCurrent = summary.date === clock.date;
+      if (clock.minutes >= evening && summaryIsCurrent && Number(summary.remaining || 0) > 0 && record.lastSent.evening !== clock.date) {
+        kind = "evening";
+        payload = { title: "오늘 남은 집안일", body: `${summary.remaining}개가 남아 있어요. 하나만 골라도 충분해요.`, url: "/", tag: `evening-${clock.date}` };
+      } else if (clock.minutes >= morning && clock.minutes < evening && record.lastSent.morning !== clock.date) {
+        kind = "morning";
+        const count = summaryIsCurrent ? Number(summary.remaining || 0) : 0;
+        payload = { title: "오늘의 집안일", body: count ? `오늘 살펴볼 일 ${count}개가 있어요.` : "오늘의 집안일을 가볍게 확인해 보세요.", url: "/", tag: `morning-${clock.date}` };
+      }
+      if (!payload) {
+        kept.push(record);
+        continue;
+      }
+      const status = await sendPush(record, payload);
+      if (status === "sent") {
+        record.lastSent[kind] = clock.date;
+        kept.push(record);
+        changed = true;
+      } else if (status !== "expired") {
+        kept.push(record);
+      }
+    }
+    if (changed || kept.length !== data.subscriptions.length) writePushData({ subscriptions: kept });
+  } finally {
+    notificationCheckRunning = false;
+  }
 }
 
 function sendJson(response, status, data, headers = {}) {
@@ -180,14 +479,22 @@ function handleStatePost(request, response) {
   readJsonBody(request, (error, incoming) => {
     if (error) return sendJson(response, 400, { ok: false, error: "invalid_state" });
     const current = readState();
-    if (current?.updatedAt && current.updatedAt > incoming.updatedAt) {
-      sendJson(response, 409, { ok: false, state: current });
-      broadcast(current);
-      return;
-    }
-    writeState(incoming);
-    broadcast(incoming);
-    sendJson(response, 200, { ok: true });
+    const merged = mergeStates(current, incoming);
+    writeState(merged);
+    broadcast(merged);
+    notifyPartnerChanges(current, merged).catch(() => {});
+    sendJson(response, 200, { ok: true, state: merged });
+  });
+}
+
+function handleStateReplace(request, response) {
+  readJsonBody(request, (error, incoming) => {
+    if (error || !incoming || !Array.isArray(incoming.events)) return sendJson(response, 400, { ok: false, error: "invalid_state" });
+    const replaced = { ...incoming, version: 6, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
+    ensureDailyBackup(readState());
+    writeJsonAtomic(DATA_FILE, replaced);
+    broadcast(replaced);
+    sendJson(response, 200, { ok: true, state: replaced });
   });
 }
 
@@ -243,6 +550,20 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (pathname === "/api/state" && request.method === "POST") return handleStatePost(request, response);
+  if (pathname === "/api/state/replace" && request.method === "POST") return handleStateReplace(request, response);
+  if (pathname === "/api/backup" && request.method === "GET") {
+    const state = readState();
+    if (!state) return sendJson(response, 404, { ok: false, error: "no_state" });
+    sendJson(response, 200, state, { "Content-Disposition": `attachment; filename="doran-backup-${seoulDateKey()}.json"` });
+    return;
+  }
+  if (pathname === "/api/push/config" && request.method === "GET") {
+    sendJson(response, 200, { enabled: pushConfiguration.enabled, publicKey: pushConfiguration.publicKey });
+    return;
+  }
+  if (pathname === "/api/push/subscribe" && request.method === "POST") return handlePushSubscribe(request, response);
+  if (pathname === "/api/push/unsubscribe" && request.method === "POST") return handlePushUnsubscribe(request, response);
+  if (pathname === "/api/push/test" && request.method === "POST") return handlePushTest(request, response);
   if (pathname === "/api/events" && request.method === "GET") {
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -270,5 +591,8 @@ server.listen(PORT, "0.0.0.0", () => {
   if (APP_PASSWORD) console.log(`가족 로그인: ${APP_USERNAME} / 설정된 비밀번호 (90일 자동 로그인)`);
   console.log("\n두 휴대폰에서 같은 주소를 열면 변경사항이 바로 공유됩니다.\n");
 });
+
+setTimeout(checkScheduledNotifications, 5000).unref();
+setInterval(checkScheduledNotifications, 30 * 1000).unref();
 
 module.exports = server;

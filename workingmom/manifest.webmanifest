@@ -3,11 +3,26 @@
   "short_name": "도란도란",
   "description": "엄마와 아빠가 함께 쓰는 집안일과 장보기 목록",
   "lang": "ko-KR",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#fbfaf7",
   "theme_color": "#2f705b",
+  "shortcuts": [
+    {
+      "name": "오늘 할 일",
+      "short_name": "오늘",
+      "url": "/?page=today",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "장보기 목록",
+      "short_name": "장보기",
+      "url": "/?page=shopping",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
   "icons": [
     {
       "src": "/icons/icon-192.png",
