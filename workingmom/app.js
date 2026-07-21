@@ -2,6 +2,7 @@ const STORAGE_KEY = "doran-chores-v1";
 const DEVICE_MEMBER_KEY = "doran-device-member-v1";
 const PENDING_REPLACE_KEY = "doran-pending-replace-v1";
 const DEVICE_LOGGED_OUT_KEY = "doran-device-logged-out-v1";
+const INSTALL_HINT_DISMISSED_KEY = "doran-install-hint-dismissed-v1";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHOPPING_CATEGORIES = { food: "식품", baby: "육아", living: "생활", other: "기타" };
 const QUICK_SHOPPING_ITEMS = [
@@ -118,6 +119,8 @@ const RECURRENCE_LABELS = {
   weekly: "매주",
   biweekly: "2주마다",
   monthly: "매월",
+  interval: "직접 정한 간격",
+  weekdays: "특정 요일",
   conditional: "조건부",
 };
 
@@ -158,6 +161,10 @@ let remotePushInFlight = false;
 let remotePushQueued = false;
 let serviceWorkerRegistration = null;
 let pushInfo = { supported: false, enabled: false, permission: typeof Notification === "undefined" ? "unsupported" : Notification.permission, loading: false };
+let syncInfo = { status: navigator.onLine ? "idle" : "offline", lastSyncedAt: 0 };
+let deferredInstallPrompt = null;
+let updateAvailable = false;
+let backupSnapshots = { loading: false, loaded: false, items: [], error: "" };
 let ui = {
   page: "today",
   filter: "all",
@@ -166,6 +173,8 @@ let ui = {
   modal: null,
   modalData: null,
   completionMember: state.currentMember,
+  shoppingTrip: false,
+  settingsSection: "",
 };
 
 let channel = null;
@@ -207,7 +216,7 @@ function makeInitialState() {
   }));
 
   return {
-    version: 6,
+    version: 7,
     clientId: `client-${Math.random().toString(36).slice(2)}`,
     updatedAt: now,
     startedAt: new Date(now).toISOString(),
@@ -220,6 +229,7 @@ function makeInitialState() {
       morningAlert: "09:00",
       eveningAlert: "20:30",
       partnerAlerts: false,
+      bottlePromptDismissedOn: "",
       workSchedule: {
         wife: { nightDays: [2, 3], start: "23:00", end: "08:00" },
         husband: { start: "10:30", end: "21:30", daysOff: [] },
@@ -232,10 +242,11 @@ function makeInitialState() {
     taskOverrides: {},
     customTasks: [],
     shoppingItems: [],
+    shoppingHistory: [],
     deletedEventIds: {},
     shoppingDeletedIds: {},
     syncMeta: { fields: {}, objects: {} },
-    notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [] },
+    notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [], needsDaysOff: false },
   };
 }
 
@@ -295,7 +306,8 @@ function migrateState(input = {}) {
       .filter(Number.isFinite);
     migrated.startedAt = new Date(recordedDates.length ? Math.min(...recordedDates) : Date.now()).toISOString();
   }
-  migrated.version = 6;
+  if (!Array.isArray(migrated.shoppingHistory)) migrated.shoppingHistory = [];
+  migrated.version = 7;
   return migrated;
 }
 
@@ -321,12 +333,13 @@ function normalizeState(input = {}, overrides = {}) {
   }
   syncMeta.fields.household ||= timestamp;
   syncMeta.fields.customTasks ||= timestamp;
+  syncMeta.fields.shoppingHistory ||= timestamp;
 
   return {
     ...base,
     ...input,
     ...overrides,
-    version: 6,
+    version: 7,
     household: {
       ...base.household,
       ...household,
@@ -340,6 +353,7 @@ function normalizeState(input = {}, overrides = {}) {
     events: Array.isArray(input.events) ? input.events : base.events,
     customTasks: Array.isArray(input.customTasks) ? input.customTasks : [],
     shoppingItems,
+    shoppingHistory: (Array.isArray(input.shoppingHistory) ? input.shoppingHistory : []).slice(0, 40),
     deletedEventIds: { ...(input.deletedEventIds || {}) },
     shoppingDeletedIds: { ...(input.shoppingDeletedIds || {}) },
     syncMeta,
@@ -355,7 +369,7 @@ function stampStateChanges(previous, now) {
   state.syncMeta ||= { fields: {}, objects: {} };
   state.syncMeta.fields ||= {};
   state.syncMeta.objects ||= {};
-  for (const field of ["household", "customTasks"]) {
+  for (const field of ["household", "customTasks", "shoppingHistory"]) {
     if (jsonChanged(previous?.[field], state[field])) state.syncMeta.fields[field] = now;
   }
   for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
@@ -389,11 +403,12 @@ function saveState(message, options = {}) {
   try { previous = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); } catch { previous = null; }
   const now = Date.now();
   stampStateChanges(previous, now);
-  state.version = 6;
+  state.version = 7;
   state.updatedAt = now;
   state.notificationSummary = buildNotificationSummary();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   if (channel) channel.postMessage({ source: state.clientId, state });
+  syncInfo.status = USE_REMOTE_SERVER ? (navigator.onLine ? "saving" : "offline") : "local";
   pushRemoteState();
   render();
   if (message) toast(message, options);
@@ -402,6 +417,7 @@ function saveState(message, options = {}) {
 async function pushRemoteState() {
   if (!USE_REMOTE_SERVER || !auth.authenticated) return;
   remotePushQueued = true;
+  syncInfo.status = navigator.onLine ? "saving" : "offline";
   if (remotePushInFlight) return;
   remotePushInFlight = true;
   while (remotePushQueued) {
@@ -419,12 +435,14 @@ async function pushRemoteState() {
       }
       if (response.ok) {
         const result = await response.json();
+        syncInfo = { status: "synced", lastSyncedAt: Date.now() };
         if (result?.state && state.updatedAt <= snapshot.updatedAt) applyRemoteState(result.state, false);
         else if (state.updatedAt > snapshot.updatedAt) remotePushQueued = true;
       }
     } catch (error) {
       remotePushQueued = true;
       connectionAvailable = false;
+      syncInfo.status = "offline";
       if (auth.authenticated) render();
       console.info("인터넷이 연결되면 변경사항을 다시 공유합니다.");
       break;
@@ -440,6 +458,7 @@ async function initRemoteSync() {
     if (response.status === 401) return showLoginAgain();
     if (!response.ok) return;
     connectionAvailable = true;
+    syncInfo = { status: "synced", lastSyncedAt: Date.now() };
     const remote = await response.json();
     if (remote?.state && (!HAD_SAVED_STATE || remote.state.updatedAt > state.updatedAt)) {
       applyRemoteState(remote.state, false);
@@ -452,12 +471,14 @@ async function initRemoteSync() {
     if (remoteStream) remoteStream.close();
     remoteStream = new EventSource("/api/events");
     remoteStream.addEventListener("open", () => {
+      syncInfo = { status: "synced", lastSyncedAt: Date.now() };
       if (!connectionAvailable) {
         connectionAvailable = true;
         render();
       }
     });
     remoteStream.addEventListener("error", () => {
+      syncInfo.status = "offline";
       if (connectionAvailable) {
         connectionAvailable = false;
         render();
@@ -466,10 +487,12 @@ async function initRemoteSync() {
     remoteStream.addEventListener("state", (event) => {
       const incoming = JSON.parse(event.data);
       if (incoming.clientId === state.clientId || incoming.updatedAt <= state.updatedAt) return;
+      syncInfo = { status: "synced", lastSyncedAt: Date.now() };
       applyRemoteState(incoming, true);
     });
   } catch (error) {
     connectionAvailable = false;
+    syncInfo.status = "offline";
     if (auth.authenticated) render();
     console.info("공동 서버 연결 없이 로컬 모드로 시작합니다.");
   }
@@ -507,6 +530,7 @@ async function initializeSession() {
       await flushPendingReplacement();
       initRemoteSync();
       syncPushMember();
+      if (ui.page === "settings") loadBackupSnapshots();
     }
   } catch {
     connectionAvailable = false;
@@ -523,6 +547,7 @@ function applyRemoteState(incoming, announce) {
   const clientId = state.clientId;
   state = normalizeState(incoming, { currentMember, clientId });
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  syncInfo = { status: "synced", lastSyncedAt: Date.now() };
   render();
   if (announce) toast("상대방의 변경사항이 바로 반영됐어요.");
 }
@@ -538,7 +563,23 @@ function pushStatusText() {
 async function registerAppWorker() {
   if (!USE_REMOTE_SERVER || !("serviceWorker" in navigator)) return;
   try {
+    const hadServiceWorkerController = Boolean(navigator.serviceWorker.controller);
     serviceWorkerRegistration = await navigator.serviceWorker.register("/sw.js");
+    serviceWorkerRegistration.addEventListener("updatefound", () => {
+      const worker = serviceWorkerRegistration.installing;
+      worker?.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) {
+          updateAvailable = true;
+          if (auth.authenticated) render();
+        }
+      });
+    });
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadServiceWorkerController) {
+        updateAvailable = true;
+        if (auth.authenticated) render();
+      }
+    });
     serviceWorkerRegistration = await navigator.serviceWorker.ready;
     pushInfo.supported = "PushManager" in window && typeof Notification !== "undefined";
     pushInfo.permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
@@ -547,6 +588,14 @@ async function registerAppWorker() {
     pushInfo.supported = false;
     console.info("오프라인 기능을 준비하지 못했습니다.", error);
   }
+}
+
+function syncStatusText() {
+  if (!USE_REMOTE_SERVER) return "이 기기에 저장됨";
+  if (!connectionAvailable || syncInfo.status === "offline") return "오프라인 · 연결 후 전송";
+  if (syncInfo.status === "saving") return "저장 중…";
+  if (syncInfo.lastSyncedAt) return "방금 동기화됨";
+  return "공동 서버 연결됨";
 }
 
 async function refreshPushInfo(shouldRender = true) {
@@ -714,6 +763,7 @@ function conditionalIsOpen(taskId) {
 function getTaskStatus(task) {
   if (!task.active) return { key: "inactive", label: "비활성", age: null };
   const today = operationalDate();
+  if (task.pausedUntil && today < task.pausedUntil) return { key: "postponed", label: `${formatHistoryDate(task.pausedUntil).replace("오늘 · ", "")}까지 쉼`, age: null };
   const postponement = state.postponed[task.id];
   if (postponement === today) return { key: "postponed", label: "오늘 미룸", age: null };
   if (postponement?.until && today < postponement.until) return { key: "postponed", label: "내일 하기로 함", age: null };
@@ -727,6 +777,14 @@ function getTaskStatus(task) {
   const last = lastResetEvent(task.id);
   if (!last) return { key: "due", label: "처음 하는 일", age: null };
   const age = dayDifference(last.createdAt);
+
+  if (task.recurrence === "weekdays") {
+    const weekday = new Date(`${today}T12:00:00`).getDay();
+    const weekdays = (task.weekdays || []).map(Number);
+    if (!weekdays.includes(weekday)) return { key: "future", label: "선택 요일 아님", age };
+    if (age <= 0) return { key: "future", label: "오늘 완료", age };
+    return { key: "due", label: "오늘 할 일", age };
+  }
 
   if (task.recurrence === "daily") {
     if (age <= 0) return { key: "future", label: "오늘 완료", age };
@@ -750,7 +808,7 @@ function getTaskStatus(task) {
     return { key: "overdue", label: `${Math.abs(remaining)}일 밀림`, age };
   }
 
-  const interval = task.intervalDays || 7;
+  const interval = task.intervalDays || (task.recurrence === "biweekly" ? 14 : 7);
   if (age < interval) return { key: "future", label: `${interval - age}일 뒤`, age };
   if (age === interval) return { key: "due", label: "오늘 권장", age };
   return { key: "overdue", label: `${age - interval}일 밀림`, age };
@@ -770,6 +828,7 @@ function buildNotificationSummary() {
     remaining: due.length,
     overdue: due.filter(({ status }) => status.key === "overdue").length,
     titles: due.slice(0, 3).map(({ task }) => task.title),
+    needsDaysOff: needsDaysOffPlan(),
   };
 }
 
@@ -803,6 +862,12 @@ function subjectName(memberId) {
 }
 
 function recurrenceLabel(task) {
+  if (task.recurrence === "interval") return `${Number(task.intervalDays || 7)}일마다`;
+  if (task.recurrence === "weekdays") {
+    const names = ["일", "월", "화", "수", "목", "금", "토"];
+    const selected = (task.weekdays || []).map((day) => names[Number(day)]).filter(Boolean);
+    return selected.length ? `매주 ${selected.join("·")}` : "특정 요일";
+  }
   return RECURRENCE_LABELS[task.recurrence] || "반복";
 }
 
@@ -923,6 +988,7 @@ function render() {
   app.innerHTML = `
     <div class="app-shell">
       ${renderTopbar()}
+      ${renderSystemBanner()}
       <main class="main">${renderPage()}</main>
       ${renderBottomNav()}
     </div>
@@ -962,7 +1028,7 @@ function renderTopbar() {
         <span class="brand-copy"><small>Our little home</small><strong>도란도란</strong></span>
       </button>
       <div class="topbar-actions">
-        ${connectionAvailable ? "" : `<span class="offline-pill">오프라인 · 기기에 저장 중</span>`}
+        <span class="sync-pill ${!connectionAvailable ? "offline" : syncInfo.status}">${escapeHtml(syncStatusText())}</span>
         <div class="member-switch" aria-label="현재 사용자 선택">
           <button class="${state.currentMember === "wife" ? "active" : ""}" data-member="wife"><span class="avatar">${wifeName.slice(0, 1)}</span><span>${wifeName}</span></button>
           <button class="${state.currentMember === "husband" ? "active" : ""}" data-member="husband"><span class="avatar husband">${husbandName.slice(0, 1)}</span><span>${husbandName}</span></button>
@@ -973,6 +1039,41 @@ function renderTopbar() {
       </div>
     </header>
   `;
+}
+
+function renderSystemBanner() {
+  const banners = [];
+  if (updateAvailable) banners.push(`<div class="system-banner"><span>새 버전이 준비됐어요.</span><button data-action="app-update">업데이트하기</button></div>`);
+  if (!isStandaloneApp() && localStorage.getItem(INSTALL_HINT_DISMISSED_KEY) !== "1") {
+    banners.push(`<div class="system-banner install-banner"><span>홈 화면에 추가하면 앱처럼 바로 열 수 있어요.</span><div><button data-page="settings" data-settings-open="install">설치 방법</button><button data-action="dismiss-install-hint">나중에</button></div></div>`);
+  }
+  return banners.join("");
+}
+
+function isStandaloneApp() {
+  return window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function installGuideText() {
+  const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  if (isStandaloneApp()) return "이 기기에서는 이미 홈 화면 앱으로 사용하고 있어요.";
+  if (deferredInstallPrompt) return "아래 버튼을 누르면 홈 화면에 바로 설치할 수 있어요.";
+  if (isIos) return "Safari의 공유 버튼을 누른 뒤 ‘홈 화면에 추가’를 선택해 주세요.";
+  return "브라우저 메뉴에서 ‘앱 설치’ 또는 ‘홈 화면에 추가’를 선택해 주세요.";
+}
+
+async function installApp() {
+  if (!deferredInstallPrompt) {
+    ui.page = "settings";
+    ui.settingsSection = "install";
+    render();
+    return;
+  }
+  deferredInstallPrompt.prompt();
+  const choice = await deferredInstallPrompt.userChoice;
+  if (choice.outcome === "accepted") localStorage.setItem(INSTALL_HINT_DISMISSED_KEY, "1");
+  deferredInstallPrompt = null;
+  render();
 }
 
 function renderBottomNav() {
@@ -1013,37 +1114,48 @@ function renderShopping() {
     || new Date(a.createdAt) - new Date(b.createdAt));
   const remaining = items.filter((item) => !item.checked).length;
   const bought = items.length - remaining;
+  const activeNames = new Set(items.map((item) => item.name.trim().toLocaleLowerCase("ko-KR")));
+  const recent = (state.shoppingHistory || []).filter((item) => !activeNames.has(String(item.name || "").trim().toLocaleLowerCase("ko-KR"))).slice(0, 6);
+  const activeGroups = categoryOrder.map((category) => ({ category, items: items.filter((item) => !item.checked && (item.category || "other") === category) })).filter((group) => group.items.length);
+  const checkedItems = items.filter((item) => item.checked);
   return `
-    <div class="inner-page shopping-page">
+    <div class="inner-page shopping-page ${ui.shoppingTrip ? "trip-mode" : ""}">
       <header class="inner-header">
         <div><p class="eyebrow">잊지 않고 함께</p><h1>장보기 목록</h1><p>${remaining ? `살 것 ${remaining}개가 남아 있어요.` : items.length ? "모두 장바구니에 담았어요." : "필요한 것을 함께 적어두세요."}</p></div>
-        ${bought ? `<button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}
+        <div class="shopping-header-actions"><button class="btn ${ui.shoppingTrip ? "primary" : ""}" data-action="shopping-trip">${ui.shoppingTrip ? "장보기 끝내기" : "장보기 시작"}</button>${bought ? `<button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}</div>
       </header>
       <section class="shopping-panel">
-        <div class="quick-shopping">
+        <div class="quick-shopping shopping-setup">
           <div><strong>자주 사는 것</strong><span>한 번 눌러 바로 추가해요</span></div>
           <div class="quick-shopping-chips">${QUICK_SHOPPING_ITEMS.map((item) => `<button class="quick-shopping-chip" data-action="shopping-quick-add" data-name="${escapeHtml(item.name)}" data-category="${item.category}">+ ${escapeHtml(item.name)}</button>`).join("")}</div>
         </div>
-        <form id="shopping-form" class="shopping-form">
+        ${recent.length ? `<div class="quick-shopping shopping-recent shopping-setup"><div><strong>최근 샀던 것</strong><span>필요하면 다시 담아요</span></div><div class="quick-shopping-chips">${recent.map((item) => `<button class="quick-shopping-chip" data-action="shopping-quick-add" data-name="${escapeHtml(item.name)}" data-category="${item.category || "other"}">+ ${escapeHtml(item.name)}</button>`).join("")}</div></div>` : ""}
+        <form id="shopping-form" class="shopping-form shopping-setup">
           <label class="shopping-name"><span class="sr-only">살 품목</span><input class="form-control" name="name" maxlength="60" placeholder="무엇을 살까요?" autocomplete="off" required></label>
           <label><span class="sr-only">분류</span><select class="form-control" name="category">${Object.entries(SHOPPING_CATEGORIES).map(([key, label]) => `<option value="${key}">${label}</option>`).join("")}</select></label>
           <label><span class="sr-only">수량 또는 메모</span><input class="form-control" name="detail" maxlength="60" placeholder="수량·메모 (선택)" autocomplete="off"></label>
           <button class="btn primary" type="submit">목록에 추가</button>
         </form>
         <div class="shopping-summary"><span><strong>${remaining}</strong>개 남음</span><span>${bought}개 구매</span></div>
-        ${items.length ? `<div class="shopping-list">${items.map((item) => `
-          <article class="shopping-row ${item.checked ? "checked" : ""}">
-            <button class="shopping-check" data-action="shopping-toggle" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} ${item.checked ? "다시 살 것으로 표시" : "구매 완료"}" aria-pressed="${item.checked}">${item.checked ? "✓" : ""}</button>
-            <button class="shopping-content" data-action="shopping-toggle" data-shopping-id="${item.id}">
-              <span class="shopping-title-line"><strong>${escapeHtml(item.name)}</strong><em>${SHOPPING_CATEGORIES[item.category] || SHOPPING_CATEGORIES.other}</em></span>
-              ${item.detail ? `<span class="shopping-detail">${escapeHtml(item.detail)}</span>` : ""}
-              <span class="shopping-meta">${escapeHtml(nameFor(item.addedBy))}이(가) 추가${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
-            </button>
-            <button class="shopping-delete" data-action="shopping-delete" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 삭제">×</button>
-          </article>`).join("")}</div>` : `<div class="shopping-empty"><span>🛒</span><strong>아직 장볼 것이 없어요</strong><p>우유, 기저귀처럼 생각난 순간 바로 적어두세요.</p></div>`}
+        ${items.length ? `<div class="shopping-list grouped-shopping-list">
+          ${activeGroups.map((group) => `<section class="shopping-group"><h2>${SHOPPING_CATEGORIES[group.category]}</h2>${group.items.map(renderShoppingItem).join("")}</section>`).join("")}
+          ${checkedItems.length ? `<section class="shopping-group bought-group"><h2>산 품목</h2>${checkedItems.map(renderShoppingItem).join("")}</section>` : ""}
+        </div>` : `<div class="shopping-empty"><span>🛒</span><strong>아직 장볼 것이 없어요</strong><p>우유, 기저귀처럼 생각난 순간 바로 적어두세요.</p></div>`}
       </section>
     </div>
   `;
+}
+
+function renderShoppingItem(item) {
+  return `<article class="shopping-row ${item.checked ? "checked" : ""}">
+    <button class="shopping-check" data-action="shopping-toggle" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} ${item.checked ? "다시 살 것으로 표시" : "구매 완료"}" aria-pressed="${item.checked}">${item.checked ? "✓" : ""}</button>
+    <button class="shopping-content" data-action="shopping-toggle" data-shopping-id="${item.id}">
+      <span class="shopping-title-line"><strong>${escapeHtml(item.name)}</strong><em>${SHOPPING_CATEGORIES[item.category] || SHOPPING_CATEGORIES.other}</em></span>
+      ${item.detail ? `<span class="shopping-detail">${escapeHtml(item.detail)}</span>` : ""}
+      <span class="shopping-meta">${escapeHtml(subjectName(item.addedBy))} 추가${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
+    </button>
+    <div class="shopping-row-actions"><button data-action="shopping-edit" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 수정">수정</button><button class="shopping-delete" data-action="shopping-delete" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 삭제">×</button></div>
+  </article>`;
 }
 
 function renderToday() {
@@ -1076,14 +1188,13 @@ function renderToday() {
             </div>
           </div>
         </section>
+        <div class="today-notices">${renderScheduleCard()}${renderConditionalCard()}</div>
         ${renderTaskSection("overdue", "조금 밀린 일", "오늘 하나만 골라도 충분해요", groups.overdue)}
         ${renderTaskSection("due", "오늘 권장", "지금 해두면 다음 며칠이 편해져요", groups.due)}
         ${renderTaskSection("available", "해도 되는 일", "여유가 있을 때 미리 해둘 수 있어요", groups.available)}
         ${renderCompletedSection(completed)}
       </div>
       <aside class="sidebar">
-        ${renderScheduleCard()}
-        ${renderConditionalCard()}
         ${state.household.showStats ? renderBalanceCard() : ""}
       </aside>
     </div>
@@ -1121,7 +1232,7 @@ function renderTaskCard(task, status) {
         <h3 class="task-title">${escapeHtml(task.title)}</h3>
         <p class="task-description">${escapeHtml(task.description || "")}</p>
         ${timingHint ? `<span class="timing-hint">◷ ${escapeHtml(timingHint)}</span>` : ""}
-        ${claim ? `<span class="claim-label">${claim.memberId === state.currentMember ? "내가 하기로 했어요" : `${escapeHtml(nameFor(claim.memberId))}이(가) 하기로 했어요`}</span>` : ""}
+        ${claim ? `<span class="claim-label">${claim.memberId === state.currentMember ? "내가 하기로 했어요" : `${escapeHtml(subjectName(claim.memberId))} 하기로 했어요`}</span>` : ""}
         ${task.subtasks?.length ? `
           <div class="subtasks">
             ${task.subtasks.map((subtask, index) => `<label class="subtask ${progress[index] ? "checked" : ""}"><input type="checkbox" data-subtask="${task.id}" data-index="${index}" ${progress[index] ? "checked" : ""}><span>${escapeHtml(subtask)}</span></label>`).join("")}
@@ -1129,10 +1240,11 @@ function renderTaskCard(task, status) {
         ` : ""}
       </div>
       <div class="task-actions">
-        <button class="btn ${ownClaim ? "ghost" : ""}" data-action="claim" data-task="${task.id}" ${otherClaim ? "disabled" : ""}>${ownClaim ? "맡기 취소" : otherClaim ? `${escapeHtml(nameFor(claim.memberId))} 맡음` : "내가 할게"}</button>
-        ${isCheck ? `<button class="btn" data-action="not-needed" data-task="${task.id}">아직 괜찮음</button>` : ""}
-        <button class="btn tomorrow" data-action="postpone-tomorrow" data-task="${task.id}">내일 하자</button>
-        <button class="btn primary" data-action="complete-open" data-task="${task.id}" ${task.subtasks?.length && !allChecked ? "disabled title=\"세부 항목을 먼저 확인해 주세요\"" : ""}>${task.kind === "timer" ? `${task.timerMinutes}분 완료` : "완료"}</button>
+        <button class="btn ${ownClaim ? "ghost" : ""}" data-action="claim" data-task="${task.id}" aria-label="${escapeHtml(task.title)} ${ownClaim ? "맡기 취소" : otherClaim ? `${escapeHtml(nameFor(claim.memberId))} 맡음` : "내가 할게"}" ${otherClaim ? "disabled" : ""}>${ownClaim ? "맡기 취소" : otherClaim ? `${escapeHtml(nameFor(claim.memberId))} 맡음` : "내가 할게"}</button>
+        ${isCheck ? `<button class="btn" data-action="not-needed" data-task="${task.id}" aria-label="${escapeHtml(task.title)} 아직 괜찮음">아직 괜찮음</button>` : ""}
+        <button class="btn tomorrow" data-action="postpone-tomorrow" data-task="${task.id}" aria-label="${escapeHtml(task.title)} 내일 하자">내일 하자</button>
+        <button class="btn ghost date-postpone" data-action="postpone-open" data-task="${task.id}" aria-label="${escapeHtml(task.title)} 다른 날">다른 날</button>
+        <button class="btn primary" data-action="complete-quick" data-task="${task.id}" aria-label="${escapeHtml(task.title)} ${task.kind === "timer" ? `${task.timerMinutes}분 완료` : "완료"}" ${task.subtasks?.length && !allChecked ? "disabled title=\"세부 항목을 먼저 확인해 주세요\"" : ""}>${task.kind === "timer" ? `${task.timerMinutes}분 완료` : "완료"}</button>
       </div>
     </article>
   `;
@@ -1150,7 +1262,7 @@ function renderCompletedSection(events) {
         if (!task) return "";
         return `<article class="task-card completed-card">
           <div class="task-icon small ${task.category}">✓</div>
-          <div class="task-main"><h3 class="task-title">${escapeHtml(task.title)}</h3><p class="task-description">${event.eventType === "not_needed" ? "아직 괜찮다고 점검" : `${escapeHtml(nameFor(event.memberId))}${event.memberId === "together" ? " " : "이(가) "}완료`} · ${formatTime(event.createdAt)}</p></div>
+          <div class="task-main"><h3 class="task-title">${escapeHtml(task.title)}</h3><p class="task-description">${event.eventType === "not_needed" ? "아직 괜찮다고 점검" : event.memberId === "together" ? `${escapeHtml(nameFor(event.memberId))} 완료` : `${escapeHtml(subjectName(event.memberId))} 완료`} · ${formatTime(event.createdAt)}</p></div>
           <div class="task-actions"><button class="btn ghost" data-page="history">기록 보기</button></div>
         </article>`;
       }).join("")}</div>` : `<div class="empty-state"><strong>첫 체크를 기다리고 있어요</strong>작은 일 하나를 끝내면 여기에 따뜻하게 기록해둘게요.</div>`}
@@ -1161,6 +1273,7 @@ function renderCompletedSection(events) {
 function renderConditionalCard() {
   const task = getTask("bottle-sterilize");
   const open = conditionalIsOpen(task.id);
+  if (open || state.household.bottlePromptDismissedOn === operationalDate()) return "";
   return `
     <section class="sidebar-card accent">
       <p class="sidebar-label">조건 확인</p>
@@ -1181,8 +1294,9 @@ function renderScheduleCard() {
   const nextDayOff = (state.household.workSchedule.husband.daysOff || [])
     .filter((date) => date >= today)
     .sort()[0];
+  const needsPlan = needsDaysOffPlan();
   return `
-    <section class="sidebar-card schedule-card">
+    <section class="sidebar-card schedule-card ${needsPlan ? "needs-plan" : ""}">
       <div class="schedule-heading">
         <div><p class="sidebar-label">오늘의 근무 리듬</p><h2 class="sidebar-title">가능한 시간에<br>서로 조금씩</h2></div>
         <span class="schedule-icon">◷</span>
@@ -1199,10 +1313,16 @@ function renderScheduleCard() {
           <i class="status-dot ${husband.tone}"></i>
         </div>
       </div>
-      <p class="schedule-note">${nextDayOff ? `${escapeHtml(nameFor("husband"))} 다음 휴무 · ${formatHistoryDate(nextDayOff).replace("오늘 · ", "")}` : `${escapeHtml(nameFor("husband"))} 휴무일은 매주 설정에서 눌러주세요.`}</p>
-      <button class="btn schedule-link" data-page="settings">근무 일정 바꾸기 →</button>
+      <p class="schedule-note">${needsPlan ? `앞으로 2주 휴무가 비어 있어요. 일정을 넣으면 안내가 더 정확해져요.` : nextDayOff ? `${escapeHtml(nameFor("husband"))} 다음 휴무 · ${formatHistoryDate(nextDayOff).replace("오늘 · ", "")}` : `${escapeHtml(nameFor("husband"))} 휴무일은 매주 설정에서 눌러주세요.`}</p>
+      <button class="btn schedule-link" data-page="settings" data-settings-open="schedule">${needsPlan ? "휴무 입력하기 →" : "근무 일정 바꾸기 →"}</button>
     </section>
   `;
+}
+
+function needsDaysOffPlan() {
+  const today = operationalDate();
+  const lastDay = dateKeyPlusDays(today, 13);
+  return !(state.household.workSchedule.husband.daysOff || []).some((date) => date >= today && date <= lastDay);
 }
 
 function weeklyBalance() {
@@ -1245,7 +1365,7 @@ function minutesText(minutes) {
 
 function renderAllTasks() {
   const filters = [
-    ["all", "전체"], ["daily", "매일"], ["window", "2~3일"], ["weekly", "매주"], ["biweekly", "2주"], ["monthly", "매월"], ["conditional", "조건부"],
+    ["all", "전체"], ["daily", "매일"], ["window", "2~3일"], ["weekly", "매주"], ["biweekly", "2주"], ["monthly", "매월"], ["interval", "직접 간격"], ["weekdays", "요일"], ["conditional", "조건부"],
   ];
   const tasks = allTasks().filter((task) => ui.filter === "all" || task.recurrence === ui.filter);
   return `
@@ -1314,6 +1434,10 @@ function historicalTaskExpectation(task, dateKey) {
     return conditionalWasOpenOnDate(task.id, dateKey) ? { key: "due", label: "사용 기록으로 필요한 일" } : null;
   }
   if (task.recurrence === "daily") return { key: "due", label: "매일 하는 일" };
+  if (task.recurrence === "weekdays") {
+    const weekday = new Date(`${dateKey}T12:00:00`).getDay();
+    return (task.weekdays || []).map(Number).includes(weekday) ? { key: "due", label: "선택한 요일의 일" } : null;
+  }
 
   const last = lastResetBeforeDate(task.id, dateKey);
   if (!last) return { key: "due", label: "완료 기록이 없던 일" };
@@ -1344,11 +1468,17 @@ function historyDayData(dateKey) {
   const checked = dayEvents.filter((event) => event.eventType === "not_needed");
   const postponed = dayEvents.filter((event) => event.eventType === "postponed");
   const handledTaskIds = new Set([...completed, ...checked].map((event) => event.taskId));
-  const postponedTaskIds = new Set(postponed.map((event) => event.taskId));
+  const postponedByTask = new Map(postponed.map((event) => [event.taskId, event]));
   const missed = allTasks()
     .map((task) => {
-      const wasPostponed = postponedTaskIds.has(task.id);
-      return { task, expectation: historicalTaskExpectation(task, dateKey) || (wasPostponed ? { key: "postponed", label: "내일 하기로 한 일" } : null), postponed: wasPostponed };
+      const postponedEvent = postponedByTask.get(task.id);
+      const wasPostponed = Boolean(postponedEvent);
+      return {
+        task,
+        expectation: historicalTaskExpectation(task, dateKey) || (wasPostponed ? { key: "postponed", label: "다른 날로 미룬 일" } : null),
+        postponed: wasPostponed,
+        postponedUntil: postponedEvent?.note || "",
+      };
     })
     .filter(({ task, expectation }) => expectation && !handledTaskIds.has(task.id));
   return { completed, checked, postponed, missed };
@@ -1459,6 +1589,57 @@ function renderHistoryEvent(event) {
   </article>`;
 }
 
+function weekStartKey(dateKey = operationalDate()) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  const offset = (date.getDay() + 6) % 7;
+  return dateKeyPlusDays(dateKey, -offset);
+}
+
+function weeklyHistorySummary() {
+  const start = weekStartKey();
+  const end = dateKeyPlusDays(start, 6);
+  const previousStart = dateKeyPlusDays(start, -7);
+  const previousEnd = dateKeyPlusDays(start, -1);
+  const inRange = (event, from, to) => {
+    const key = operationalDate(event.createdAt);
+    return key >= from && key <= to;
+  };
+  const current = state.events.filter((event) => ["completed", "not_needed", "postponed"].includes(event.eventType) && inRange(event, start, end));
+  const previous = state.events.filter((event) => ["completed", "not_needed"].includes(event.eventType) && inRange(event, previousStart, previousEnd));
+  const minutes = { wife: 0, husband: 0 };
+  current.filter((event) => event.eventType === "completed").forEach((event) => {
+    const estimate = Number(getTask(event.taskId)?.estimate || 0);
+    if (event.memberId === "together") {
+      minutes.wife += estimate / 2;
+      minutes.husband += estimate / 2;
+    } else if (minutes[event.memberId] !== undefined) minutes[event.memberId] += estimate;
+  });
+  const postponedCounts = new Map();
+  current.filter((event) => event.eventType === "postponed").forEach((event) => postponedCounts.set(event.taskId, (postponedCounts.get(event.taskId) || 0) + 1));
+  const repeated = [...postponedCounts.entries()]
+    .filter(([, count]) => count >= 2)
+    .map(([taskId, count]) => ({ task: getTask(taskId), count }))
+    .filter(({ task }) => task)
+    .sort((left, right) => right.count - left.count);
+  const handled = current.filter((event) => ["completed", "not_needed"].includes(event.eventType)).length;
+  return { start, end, handled, previousHandled: previous.length, minutes, repeated };
+}
+
+function renderWeeklyHistorySummary() {
+  const summary = weeklyHistorySummary();
+  const difference = summary.handled - summary.previousHandled;
+  const comparison = difference > 0 ? `지난주보다 ${difference}개 더 확인했어요` : difference < 0 ? `지난주보다 ${Math.abs(difference)}개 덜 했어요` : "지난주와 같은 수예요";
+  return `<section class="weekly-summary-panel">
+    <div class="weekly-summary-heading"><div><p class="eyebrow">이번 주 돌아보기</p><h2>${formatHistoryDate(summary.start).replace("오늘 · ", "")}부터</h2></div><span>${escapeHtml(comparison)}</span></div>
+    <div class="weekly-summary-grid">
+      <div><strong>${summary.handled}</strong><span>완료·점검</span></div>
+      <div><strong>${minutesText(summary.minutes.wife)}</strong><span>${escapeHtml(nameFor("wife"))}의 수고</span></div>
+      <div><strong>${minutesText(summary.minutes.husband)}</strong><span>${escapeHtml(nameFor("husband"))}의 수고</span></div>
+    </div>
+    ${summary.repeated.length ? `<div class="repeated-postponed"><strong>이번 주 계속 미룬 일</strong><div>${summary.repeated.map(({ task, count }) => `<span>${escapeHtml(task.title)} · ${count}번</span>`).join("")}</div></div>` : `<p class="weekly-gentle-note">반복해서 미룬 일이 없어요. 서로의 흐름을 잘 맞추고 있어요.</p>`}
+  </section>`;
+}
+
 function renderHistory() {
   const today = operationalDate();
   ui.historyDate = ui.historyDate > today ? today : ui.historyDate;
@@ -1471,6 +1652,7 @@ function renderHistory() {
   return `
     <div class="inner-page history-page">
       <header class="inner-header"><div><p class="eyebrow">함께 쌓인 하루</p><h1>날짜별 기록</h1><p>날짜를 고르면 누가 무엇을 했고, 그날 하지 못한 일은 무엇인지 볼 수 있어요.</p></div></header>
+      ${renderWeeklyHistorySummary()}
       <div class="history-layout">
         ${renderHistoryCalendar()}
         <section class="history-day-panel">
@@ -1496,11 +1678,11 @@ function renderHistory() {
 
           <section class="history-detail-section missed-section">
             <div class="history-detail-title"><h3>${isToday ? "아직 하지 않은 일" : "하지 않았던 일"}</h3><span>그날 주기가 실제로 돌아온 일만 보여줘요</span></div>
-            ${data.missed.length ? `<div class="history-list">${data.missed.map(({ task, expectation, postponed }) => `
+            ${data.missed.length ? `<div class="history-list">${data.missed.map(({ task, expectation, postponed, postponedUntil }) => `
               <article class="history-row missed-row">
                 <div class="history-check missed">!</div>
                 <div><h3>${escapeHtml(task.title)}</h3><p>${escapeHtml(expectation.label)} · ${recurrenceLabel(task)}</p></div>
-                <span class="history-missed-label ${postponed ? "postponed" : ""}">${postponed ? "내일로 넘김" : isToday ? "아직 미완료" : "완료 기록 없음"}</span>
+                <span class="history-missed-label ${postponed ? "postponed" : ""}">${postponed ? `${postponedUntil ? `${escapeHtml(formatHistoryDate(postponedUntil).replace("오늘 · ", ""))}로 ` : ""}미룸` : isToday ? "아직 미완료" : "완료 기록 없음"}</span>
               </article>
             `).join("")}</div>` : `<div class="history-all-done"><span>✓</span><div><strong>${isToday ? "현재까지 놓친 일이 없어요" : "그날 할 일을 모두 확인했어요"}</strong><p>작은 수고가 차곡차곡 기록되어 있어요.</p></div></div>`}
           </section>
@@ -1529,6 +1711,51 @@ function upcomingDates(count = 14) {
   return dates;
 }
 
+function renderBackupSnapshots() {
+  if (backupSnapshots.loading) return `<div class="backup-snapshots"><p>복원 지점을 불러오는 중이에요…</p></div>`;
+  if (backupSnapshots.error) return `<div class="backup-snapshots error"><p>${escapeHtml(backupSnapshots.error)}</p></div>`;
+  if (!backupSnapshots.loaded) return `<div class="backup-snapshots"><p>자동 백업 날짜를 불러오면 원하는 날로 복원할 수 있어요.</p></div>`;
+  if (!backupSnapshots.items.length) return `<div class="backup-snapshots"><p>아직 자동 백업이 없어요.</p></div>`;
+  return `<details class="backup-snapshots"><summary>자동 복원 지점 ${backupSnapshots.items.length}개 보기</summary><div class="backup-snapshot-list">${backupSnapshots.items.map((item) => `<div><span><strong>${formatHistoryDate(item.date).replace("오늘 · ", "")}</strong><small>${Math.max(1, Math.round(Number(item.size || 0) / 1024))}KB</small></span><button class="btn ghost danger" data-action="backup-restore" data-date="${item.date}">이날로 복원</button></div>`).join("")}</div></details>`;
+}
+
+async function loadBackupSnapshots(force = false) {
+  if (!USE_REMOTE_SERVER || backupSnapshots.loading || (backupSnapshots.loaded && !force)) return;
+  backupSnapshots = { ...backupSnapshots, loading: true, error: "" };
+  if (auth.authenticated) render();
+  try {
+    const response = await fetch("/api/backups", { cache: "no-store" });
+    if (!response.ok) throw new Error("load_failed");
+    const result = await response.json();
+    backupSnapshots = { loading: false, loaded: true, items: Array.isArray(result.backups) ? result.backups : [], error: "" };
+  } catch {
+    backupSnapshots = { loading: false, loaded: true, items: [], error: "복원 지점을 불러오지 못했어요. 잠시 후 다시 확인해 주세요." };
+  }
+  if (auth.authenticated) render();
+}
+
+async function restoreBackupSnapshot(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+  if (!window.confirm(`${formatHistoryDate(date).replace("오늘 · ", "")}의 자동 백업으로 공동 기록을 되돌릴까요?\n오늘 만들어진 자동 백업은 그대로 유지됩니다.`)) return;
+  try {
+    const response = await fetch(`/api/backups/${date}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("restore_failed");
+    const result = await response.json();
+    const incoming = result.state;
+    if (!incoming?.household || !Array.isArray(incoming.events)) throw new Error("invalid_backup");
+    const currentMember = state.currentMember;
+    const clientId = state.clientId;
+    state = normalizeState(incoming, { currentMember, clientId, updatedAt: Date.now() });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(PENDING_REPLACE_KEY, JSON.stringify(state));
+    render();
+    const replaced = await flushPendingReplacement();
+    toast(replaced ? "선택한 날짜의 백업을 두 기기에 복원했어요." : "이 기기에 복원했어요. 연결되면 함께 반영할게요.");
+  } catch {
+    toast("백업을 복원하지 못했어요. 잠시 후 다시 시도해 주세요.");
+  }
+}
+
 function renderSettings() {
   const wifeSchedule = state.household.workSchedule.wife;
   const husbandSchedule = state.household.workSchedule.husband;
@@ -1550,7 +1777,7 @@ function renderSettings() {
           </div>
         </div>
       </section>
-      <section class="settings-section">
+      <section class="settings-section" id="schedule-settings">
         <h2>근무 일정</h2>
         <div class="setting-row">
           <div><h3>${escapeHtml(nameFor("wife"))} 야간근무</h3><p>선택한 요일 밤에 출근해 다음 날 아침 퇴근하는 일정이에요.</p></div>
@@ -1565,8 +1792,10 @@ function renderSettings() {
         </div>
         <div class="setting-row offday-setting">
           <div><h3>${escapeHtml(nameFor("husband"))} 변동 휴무</h3><p>앞으로 5주 중 쉬는 날을 눌러주세요. 초록색 날짜가 휴무예요.</p></div>
-          <div class="offday-calendar-wrap">
-            <div class="offday-calendar-actions"><span>앞으로 5주</span><button class="btn ghost" data-action="copy-days-off">이번 주 휴무를 다음 주에 복사</button></div>
+          <details class="offday-details" ${ui.settingsSection === "schedule" || needsDaysOffPlan() ? "open" : ""}>
+            <summary>${needsDaysOffPlan() ? "휴무 입력이 필요해요" : "5주 휴무 달력 열기"}</summary>
+            <div class="offday-calendar-wrap">
+            <div class="offday-calendar-actions"><span>앞으로 5주</span><div><button class="btn ghost" data-action="copy-days-off">이번 주 → 다음 주</button><button class="btn ghost" data-action="repeat-days-off">최근 패턴 적용</button></div></div>
             <div class="offday-weekdays">${weekdayNames.map((day) => `<span>${day}</span>`).join("")}</div>
             <div class="offday-grid">
               ${Array.from({ length: new Date().getDay() }, () => `<span class="offday-blank"></span>`).join("")}
@@ -1576,7 +1805,8 @@ function renderSettings() {
             return `<button class="offday-btn ${active ? "active" : ""}" data-action="toggle-day-off" data-date="${key}"><small>${weekdayNames[date.getDay()]}</small><strong>${date.getMonth() + 1}/${date.getDate()}</strong></button>`;
               }).join("")}
             </div>
-          </div>
+            </div>
+          </details>
         </div>
       </section>
       <section class="settings-section">
@@ -1613,6 +1843,17 @@ function renderSettings() {
           <label class="toggle" style="justify-self:end"><input type="checkbox" data-setting-toggle="showStats" ${state.household.showStats ? "checked" : ""}><span></span></label>
         </div>
       </section>
+      <section class="settings-section ${ui.settingsSection === "install" ? "highlight-setting" : ""}" id="install-settings">
+        <h2>홈 화면 앱</h2>
+        <div class="setting-row">
+          <div><h3>${isStandaloneApp() ? "앱으로 사용 중" : "도란도란 바로 열기"}</h3><p>${escapeHtml(installGuideText())}</p></div>
+          ${isStandaloneApp() ? `<span class="setting-ok">설치됨</span>` : `<button class="btn primary" data-action="install-app">${deferredInstallPrompt ? "홈 화면에 설치" : "설치 방법 보기"}</button>`}
+        </div>
+        <div class="setting-row">
+          <div><h3>공동 데이터 상태</h3><p>두 휴대폰의 마지막 저장 상태를 확인해요.</p></div>
+          <span class="sync-detail ${syncInfo.status}">${escapeHtml(syncStatusText())}</span>
+        </div>
+      </section>
       ${USE_REMOTE_SERVER ? `<section class="settings-section">
         <h2>로그인</h2>
         <div class="setting-row">
@@ -1627,9 +1868,11 @@ function renderSettings() {
           <div class="data-actions">
             <button class="btn" data-action="data-export">백업 내려받기</button>
             <button class="btn" data-action="data-import">백업 불러오기</button>
+            ${USE_REMOTE_SERVER ? `<button class="btn ghost" data-action="backup-refresh">복원 지점 새로고침</button>` : ""}
             <input id="backup-import-input" type="file" accept="application/json,.json" hidden>
           </div>
         </div>
+        ${USE_REMOTE_SERVER ? renderBackupSnapshots() : ""}
       </section>
       <section class="danger-zone">
         <div><h3>처음 상태로 되돌리기</h3><p>공유된 완료 기록, 장보기 목록과 설정을 모두 지워요.</p></div>
@@ -1646,7 +1889,9 @@ function renderModal() {
     return;
   }
   if (ui.modal === "complete") root.innerHTML = renderCompleteModal();
+  if (ui.modal === "postpone") root.innerHTML = renderPostponeModal();
   if (ui.modal === "task") root.innerHTML = renderTaskModal();
+  if (ui.modal === "shopping") root.innerHTML = renderShoppingEditModal();
   if (ui.modal === "alerts") root.innerHTML = renderAlertsModal();
 }
 
@@ -1657,26 +1902,70 @@ function modalShell(title, subtitle, content) {
 function renderCompleteModal() {
   const task = getTask(ui.modalData.taskId);
   if (!task) return "";
+  const existing = ui.modalData.eventId ? state.events.find((event) => event.id === ui.modalData.eventId) : null;
   const options = ["wife", "husband", "together"];
   const content = `
     <form id="complete-form">
       <label class="field-label">누가 완료했나요?</label>
       <div class="choice-grid">${options.map((member) => `<label class="choice ${ui.completionMember === member ? "selected" : ""}"><input type="radio" name="member" value="${member}" ${ui.completionMember === member ? "checked" : ""} data-completion-member="${member}"><span>${member === "together" ? "둘이 함께" : escapeHtml(nameFor(member))}</span></label>`).join("")}</div>
-      <label class="field-label">짧은 메모 · 선택<textarea class="form-control" name="note" rows="3" placeholder="특별히 남길 내용이 있다면 적어주세요"></textarea></label>
-      <div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">완료로 기록</button></div>
+      <label class="field-label">짧은 메모 · 선택<textarea class="form-control" name="note" rows="3" placeholder="특별히 남길 내용이 있다면 적어주세요">${escapeHtml(existing?.note || "")}</textarea></label>
+      <div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">${existing ? "완료자 변경" : "완료로 기록"}</button></div>
     </form>`;
   return modalShell(task.title, `${task.estimate}분의 수고를 따뜻하게 기록할게요.`, content);
 }
 
+function renderPostponeModal() {
+  const task = getTask(ui.modalData?.taskId);
+  if (!task) return "";
+  const today = operationalDate();
+  const tomorrow = dateKeyPlusDays(today, 1);
+  const weekendOffset = (6 - new Date(`${today}T12:00:00`).getDay() + 7) % 7 || 7;
+  const weekend = dateKeyPlusDays(today, weekendOffset);
+  const nextMondayOffset = (8 - new Date(`${today}T12:00:00`).getDay()) % 7 || 7;
+  const nextMonday = dateKeyPlusDays(today, nextMondayOffset);
+  const content = `<div class="postpone-options">
+    <button class="postpone-choice" data-action="postpone-choice" data-task="${task.id}" data-date="${tomorrow}"><strong>내일</strong><span>${formatHistoryDate(tomorrow).replace("오늘 · ", "")}</span></button>
+    <button class="postpone-choice" data-action="postpone-choice" data-task="${task.id}" data-date="${weekend}"><strong>이번 주말</strong><span>${formatHistoryDate(weekend).replace("오늘 · ", "")}</span></button>
+    <button class="postpone-choice" data-action="postpone-choice" data-task="${task.id}" data-date="${nextMonday}"><strong>이번 주 쉬기</strong><span>다음 월요일 다시 표시</span></button>
+    <form id="postpone-form" class="postpone-date-form">
+      <input type="hidden" name="taskId" value="${task.id}">
+      <label class="field-label">직접 날짜 선택<input class="form-control" type="date" name="date" min="${tomorrow}" required></label>
+      <button class="btn primary" type="submit">이 날짜로 미루기</button>
+    </form>
+  </div>`;
+  return modalShell(`${task.title} 미루기`, "내일 하자는 그대로 바로 누를 수 있고, 필요할 때만 날짜를 골라요.", content);
+}
+
+function renderShoppingEditModal() {
+  const item = state.shoppingItems.find((entry) => entry.id === ui.modalData?.shoppingId);
+  if (!item) return "";
+  const content = `<form id="shopping-edit-form" class="modal-form">
+    <input type="hidden" name="shoppingId" value="${item.id}">
+    <label class="field-label">품목 이름<input class="form-control" name="name" maxlength="60" required value="${escapeHtml(item.name)}"></label>
+    <label class="field-label">분류<select class="form-control" name="category">${Object.entries(SHOPPING_CATEGORIES).map(([key, label]) => `<option value="${key}" ${item.category === key ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="field-label">수량 또는 메모<input class="form-control" name="detail" maxlength="60" value="${escapeHtml(item.detail || "")}"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">수정 저장</button></div>
+  </form>`;
+  return modalShell("장보기 품목 수정", "수량이나 분류가 달라져도 바로 고칠 수 있어요.", content);
+}
+
 function renderTaskModal() {
   const task = ui.modalData?.taskId ? getTask(ui.modalData.taskId) : null;
+  const recurrenceOptions = ["daily", "window", "weekly", "biweekly", "monthly", "interval", "weekdays"];
+  if (task?.recurrence === "conditional") recurrenceOptions.push("conditional");
+  const weekdayNames = ["일", "월", "화", "수", "목", "금", "토"];
+  const selectedWeekdays = (task?.weekdays || []).map(Number);
   const content = `
     <form id="task-form" class="modal-form">
       <input type="hidden" name="taskId" value="${task?.id || ""}">
       <label class="field-label">집안일 이름<input class="form-control" name="title" required maxlength="40" value="${escapeHtml(task?.title || "")}" placeholder="예: 공기청정기 필터 확인"></label>
       <label class="field-label">간단한 설명<input class="form-control" name="description" maxlength="100" value="${escapeHtml(task?.description || "")}" placeholder="부담 없이 알아볼 수 있게 적어주세요"></label>
-      <label class="field-label">반복 주기<select class="form-control" name="recurrence">${["daily", "window", "weekly", "biweekly", "monthly"].map((recurrence) => `<option value="${recurrence}" ${task?.recurrence === recurrence ? "selected" : ""}>${RECURRENCE_LABELS[recurrence]}</option>`).join("")}</select></label>
+      <label class="field-label">반복 주기<select class="form-control" name="recurrence" data-task-recurrence>${recurrenceOptions.map((recurrence) => `<option value="${recurrence}" ${task?.recurrence === recurrence ? "selected" : ""}>${RECURRENCE_LABELS[recurrence]}</option>`).join("")}</select></label>
+      <div class="recurrence-panel" data-recurrence-fields="interval" ${task?.recurrence === "interval" ? "" : "hidden"}><label class="field-label">며칠마다<input class="form-control" type="number" name="intervalDays" min="2" max="365" value="${Number(task?.intervalDays || 7)}"></label></div>
+      <div class="recurrence-panel" data-recurrence-fields="weekdays" ${task?.recurrence === "weekdays" ? "" : "hidden"}><span class="field-label">반복할 요일</span><div class="weekday-picker task-weekday-picker">${weekdayNames.map((day, index) => `<label class="weekday-choice"><input type="checkbox" name="weekdays" value="${index}" ${selectedWeekdays.includes(index) ? "checked" : ""}><span>${day}</span></label>`).join("")}</div></div>
       <label class="field-label">예상 시간 · 분<input class="form-control" type="number" name="estimate" min="1" max="240" value="${task?.estimate || 10}"></label>
+      <label class="field-label">세부 체크 항목 · 선택<textarea class="form-control" name="subtasks" rows="4" placeholder="한 줄에 하나씩 적어주세요">${escapeHtml((task?.subtasks || []).join("\n"))}</textarea></label>
+      <label class="field-label">이 날짜까지 잠시 쉬기 · 선택<input class="form-control" type="date" name="pausedUntil" min="${dateKeyPlusDays(operationalDate(), 1)}" value="${escapeHtml(task?.pausedUntil || "")}"></label>
       <div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">${task ? "수정 저장" : "집안일 추가"}</button></div>
     </form>`;
   return modalShell(task ? "집안일 수정" : "새 집안일", "실제 생활에 맞게 언제든 바꿀 수 있어요.", content);
@@ -1698,8 +1987,11 @@ document.addEventListener("click", (event) => {
   const pageButton = event.target.closest("[data-page]");
   if (pageButton) {
     ui.page = pageButton.dataset.page;
+    if (pageButton.dataset.settingsOpen) ui.settingsSection = pageButton.dataset.settingsOpen;
+    if (ui.page === "settings" && USE_REMOTE_SERVER && !backupSnapshots.loaded && !backupSnapshots.loading) loadBackupSnapshots();
     window.scrollTo({ top: 0, behavior: "smooth" });
     render();
+    if (pageButton.dataset.settingsOpen) requestAnimationFrame(() => document.getElementById(`${pageButton.dataset.settingsOpen}-settings`)?.scrollIntoView({ behavior: "smooth", block: "start" }));
     return;
   }
 
@@ -1729,16 +2021,17 @@ document.addEventListener("click", (event) => {
 
   if (action === "claim") return toggleClaim(taskId);
   if (action === "postpone-tomorrow") return postponeUntilTomorrow(taskId);
-  if (action === "not-needed") return markNotNeeded(taskId);
-  if (action === "complete-open") {
-    ui.modal = "complete";
+  if (action === "postpone-open") {
+    ui.modal = "postpone";
     ui.modalData = { taskId };
-    ui.completionMember = state.currentMember;
     renderModal();
     return;
   }
+  if (action === "postpone-choice") return postponeTaskUntil(taskId, actionButton.dataset.date);
+  if (action === "not-needed") return markNotNeeded(taskId);
+  if (action === "complete-quick") return completeTask(taskId, state.currentMember, "", { quick: true });
   if (action === "bottle-trigger") return triggerBottle();
-  if (action === "bottle-no") return toast("사용하지 않은 날은 아무 일도 만들지 않아요.");
+  if (action === "bottle-no") return dismissBottlePrompt();
   if (action === "undo-event") return undoEvent(actionButton.dataset.event);
   if (action === "task-add") {
     ui.modal = "task";
@@ -1764,16 +2057,24 @@ document.addEventListener("click", (event) => {
   if (action === "toggle-night-day") return toggleNightDay(Number(actionButton.dataset.day));
   if (action === "toggle-day-off") return toggleDayOff(actionButton.dataset.date);
   if (action === "copy-days-off") return copyPreviousWeekDaysOff();
+  if (action === "repeat-days-off") return repeatRecentDaysOffPattern();
   if (action === "set-device-member") return setDeviceMember(actionButton.dataset.memberId);
   if (action === "shopping-quick-add") return addQuickShoppingItem(actionButton.dataset.name, actionButton.dataset.category);
   if (action === "shopping-toggle") return toggleShoppingItem(actionButton.dataset.shoppingId);
   if (action === "shopping-delete") return deleteShoppingItem(actionButton.dataset.shoppingId);
+  if (action === "shopping-edit") return openShoppingEdit(actionButton.dataset.shoppingId);
+  if (action === "shopping-trip") { ui.shoppingTrip = !ui.shoppingTrip; render(); return; }
   if (action === "shopping-clear-bought") return clearBoughtShoppingItems();
   if (action === "push-enable") return enablePushNotifications();
   if (action === "push-disable") return disablePushNotifications();
   if (action === "push-test") return testPushNotification();
   if (action === "data-export") return exportBackup();
   if (action === "data-import") return document.getElementById("backup-import-input")?.click();
+  if (action === "backup-refresh") return loadBackupSnapshots(true);
+  if (action === "backup-restore") return restoreBackupSnapshot(actionButton.dataset.date);
+  if (action === "install-app") return installApp();
+  if (action === "dismiss-install-hint") { localStorage.setItem(INSTALL_HINT_DISMISSED_KEY, "1"); render(); return; }
+  if (action === "app-update") return window.location.reload();
   if (action === "reset-today") return resetTodayChecks();
   if (action === "reset-date") return resetDateChecks(actionButton.dataset.date);
   if (action === "logout") return logout();
@@ -1784,6 +2085,10 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target;
+  if (target.matches("[data-task-recurrence]")) {
+    document.querySelectorAll("[data-recurrence-fields]").forEach((panel) => { panel.hidden = panel.dataset.recurrenceFields !== target.value; });
+    return;
+  }
   if (target.id === "backup-import-input") {
     const file = target.files?.[0];
     if (file) importBackup(file);
@@ -1860,13 +2165,21 @@ document.addEventListener("submit", async (event) => {
   }
   if (event.target.id === "complete-form") {
     const form = new FormData(event.target);
-    completeTask(ui.modalData.taskId, form.get("member"), String(form.get("note") || "").trim());
+    if (ui.modalData.eventId) updateCompletionEvent(ui.modalData.eventId, form.get("member"), String(form.get("note") || "").trim());
+    else completeTask(ui.modalData.taskId, form.get("member"), String(form.get("note") || "").trim());
+  }
+  if (event.target.id === "postpone-form") {
+    const form = new FormData(event.target);
+    postponeTaskUntil(String(form.get("taskId") || ""), String(form.get("date") || ""));
   }
   if (event.target.id === "task-form") {
     saveTaskFromForm(new FormData(event.target));
   }
   if (event.target.id === "shopping-form") {
     addShoppingItem(new FormData(event.target));
+  }
+  if (event.target.id === "shopping-edit-form") {
+    saveShoppingEdit(new FormData(event.target));
   }
 });
 
@@ -1883,7 +2196,7 @@ function toggleClaim(taskId) {
   }
   if (claim) return;
   state.claims[taskId] = { memberId: state.currentMember, claimedAt: new Date().toISOString() };
-  saveState(`${nameFor(state.currentMember)}이(가) 하기로 했어요.`);
+  saveState(`${subjectName(state.currentMember)} 하기로 했어요.`);
 }
 
 function addShoppingItem(form) {
@@ -1909,7 +2222,7 @@ function addShoppingItemValues(name, detail, category) {
     duplicate.checkedBy = null;
     duplicate.checkedAt = null;
     duplicate.category = category || duplicate.category;
-    saveState(`${name}을(를) 다시 살 목록으로 옮겼어요.`, {
+    saveState(`${name}, 다시 살 목록으로 옮겼어요.`, {
       onUndo: () => { Object.assign(duplicate, before); saveState("되돌렸어요."); },
     });
     return;
@@ -1927,7 +2240,7 @@ function addShoppingItemValues(name, detail, category) {
     updatedAt: Date.now(),
   };
   state.shoppingItems.push(item);
-  saveState(`${name}을(를) 장보기 목록에 추가했어요.`, {
+  saveState(`${name}, 장보기 목록에 추가했어요.`, {
     onUndo: () => {
       state.shoppingItems = state.shoppingItems.filter((entry) => entry.id !== item.id);
       saveState("추가를 되돌렸어요.");
@@ -1942,9 +2255,28 @@ function toggleShoppingItem(itemId) {
   item.checked = !item.checked;
   item.checkedBy = item.checked ? state.currentMember : null;
   item.checkedAt = item.checked ? new Date().toISOString() : null;
-  saveState(item.checked ? `${item.name}, 장바구니에 담았어요.` : `${item.name}을(를) 다시 살 목록으로 옮겼어요.`, {
+  saveState(item.checked ? `${item.name}, 장바구니에 담았어요.` : `${item.name}, 다시 살 목록으로 옮겼어요.`, {
     onUndo: () => { Object.assign(item, before); saveState("장보기 체크를 되돌렸어요."); },
   });
+}
+
+function openShoppingEdit(itemId) {
+  if (!state.shoppingItems.some((item) => item.id === itemId)) return;
+  ui.modal = "shopping";
+  ui.modalData = { shoppingId: itemId };
+  renderModal();
+}
+
+function saveShoppingEdit(form) {
+  const item = state.shoppingItems.find((entry) => entry.id === String(form.get("shoppingId") || ""));
+  if (!item) return closeModal();
+  const name = String(form.get("name") || "").trim();
+  if (!name) return;
+  item.name = name.slice(0, 60);
+  item.detail = String(form.get("detail") || "").trim().slice(0, 60);
+  item.category = SHOPPING_CATEGORIES[form.get("category")] ? String(form.get("category")) : "other";
+  closeModal(false);
+  saveState("장보기 품목을 수정했어요.");
 }
 
 function deleteShoppingItem(itemId) {
@@ -1952,7 +2284,7 @@ function deleteShoppingItem(itemId) {
   if (!item) return;
   const index = state.shoppingItems.indexOf(item);
   state.shoppingItems = state.shoppingItems.filter((entry) => entry.id !== itemId);
-  saveState(`${item.name}을(를) 목록에서 지웠어요.`, {
+  saveState(`${item.name}, 목록에서 지웠어요.`, {
     onUndo: () => {
       state.shoppingItems.splice(Math.min(index, state.shoppingItems.length), 0, item);
       saveState("삭제를 되돌렸어요.");
@@ -1964,9 +2296,16 @@ function clearBoughtShoppingItems() {
   const removed = state.shoppingItems.filter((item) => item.checked);
   const bought = removed.length;
   if (!removed.length) return;
+  const previousHistory = JSON.parse(JSON.stringify(state.shoppingHistory || []));
+  const history = new Map((state.shoppingHistory || []).map((item) => [`${String(item.name || "").trim().toLocaleLowerCase("ko-KR")}|${item.category || "other"}`, item]));
+  removed.forEach((item) => {
+    const record = { name: item.name, detail: item.detail || "", category: item.category || "other", lastBoughtAt: item.checkedAt || new Date().toISOString() };
+    history.set(`${record.name.trim().toLocaleLowerCase("ko-KR")}|${record.category}`, record);
+  });
+  state.shoppingHistory = [...history.values()].sort((left, right) => new Date(right.lastBoughtAt || 0) - new Date(left.lastBoughtAt || 0)).slice(0, 40);
   state.shoppingItems = state.shoppingItems.filter((item) => !item.checked);
   saveState(`구매한 품목 ${bought}개를 정리했어요.`, {
-    onUndo: () => { state.shoppingItems.push(...removed); saveState("정리를 되돌렸어요."); },
+    onUndo: () => { state.shoppingItems.push(...removed); state.shoppingHistory = previousHistory; saveState("정리를 되돌렸어요."); },
   });
 }
 
@@ -1979,6 +2318,7 @@ function toggleNightDay(day) {
 }
 
 function toggleDayOff(date) {
+  ui.settingsSection = "schedule";
   const current = new Set(state.household.workSchedule.husband.daysOff || []);
   const wasDayOff = current.has(date);
   if (wasDayOff) current.delete(date);
@@ -1988,6 +2328,7 @@ function toggleDayOff(date) {
 }
 
 function copyPreviousWeekDaysOff() {
+  ui.settingsSection = "schedule";
   const current = new Set(state.household.workSchedule.husband.daysOff || []);
   const today = new Date();
   today.setHours(12, 0, 0, 0);
@@ -2009,6 +2350,24 @@ function copyPreviousWeekDaysOff() {
   }
   state.household.workSchedule.husband.daysOff = [...current].sort();
   saveState(copied ? `이번 주 휴무 ${copied}일을 다음 주에 복사했어요.` : "이번 주에 선택한 휴무가 없어 다음 주를 비워뒀어요.");
+}
+
+function repeatRecentDaysOffPattern() {
+  ui.settingsSection = "schedule";
+  const today = operationalDate();
+  const current = new Set(state.household.workSchedule.husband.daysOff || []);
+  const recentStart = dateKeyPlusDays(today, -21);
+  const recentWeekdays = new Set([...current]
+    .filter((date) => date >= recentStart && date < today)
+    .map((date) => new Date(`${date}T12:00:00`).getDay()));
+  if (!recentWeekdays.size) return toast("최근 3주에 기록된 휴무가 없어 패턴을 찾지 못했어요.");
+  for (let offset = 0; offset < 35; offset += 1) {
+    const date = dateKeyPlusDays(today, offset);
+    current.delete(date);
+    if (recentWeekdays.has(new Date(`${date}T12:00:00`).getDay())) current.add(date);
+  }
+  state.household.workSchedule.husband.daysOff = [...current].sort();
+  saveState(`최근 휴무 요일을 앞으로 5주에 적용했어요.`);
 }
 
 function setDeviceMember(memberId) {
@@ -2055,7 +2414,12 @@ function restoreEntry(object, key, captured) {
 }
 
 function postponeUntilTomorrow(taskId) {
+  postponeTaskUntil(taskId, dateKeyPlusDays(operationalDate(), 1));
+}
+
+function postponeTaskUntil(taskId, targetDate) {
   const today = operationalDate();
+  if (!getTask(taskId) || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate) || targetDate <= today) return toast("오늘보다 뒤의 날짜를 골라주세요.");
   const previous = captureEntry(state.postponed, taskId);
   const created = {
     id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -2063,15 +2427,17 @@ function postponeUntilTomorrow(taskId) {
     eventType: "postponed",
     memberId: state.currentMember,
     createdAt: new Date().toISOString(),
-    note: dateKeyPlusDays(today, 1),
+    note: targetDate,
   };
   state.events.push(created);
-  state.postponed[taskId] = { hiddenOn: today, until: dateKeyPlusDays(today, 1) };
-  saveState("내일 할 일로 옮겼어요. 내일 목록에 다시 나타나요.", {
+  state.postponed[taskId] = { hiddenOn: today, until: targetDate };
+  closeModal(false);
+  const targetLabel = targetDate === dateKeyPlusDays(today, 1) ? "내일" : formatHistoryDate(targetDate).replace("오늘 · ", "");
+  saveState(`${targetLabel} 다시 나타나도록 옮겼어요.`, {
     onUndo: () => {
       state.events = state.events.filter((event) => event.id !== created.id);
       restoreEntry(state.postponed, taskId, previous);
-      saveState("‘내일 하자’를 되돌렸어요.");
+      saveState("미루기를 되돌렸어요.");
     },
   });
 }
@@ -2103,7 +2469,7 @@ function markNotNeeded(taskId) {
   });
 }
 
-function completeTask(taskId, memberId, note) {
+function completeTask(taskId, memberId, note, options = {}) {
   const previousClaim = captureEntry(state.claims, taskId);
   const previousProgress = captureEntry(state.subtaskProgress, taskId);
   const previousPostponed = captureEntry(state.postponed, taskId);
@@ -2120,15 +2486,38 @@ function completeTask(taskId, memberId, note) {
   delete state.subtaskProgress[taskId];
   delete state.postponed[taskId];
   closeModal(false);
-  saveState(memberId === "together" ? "함께 완료했어요. 두 분 모두 수고했어요!" : `${nameFor(memberId)}의 완료로 기록했어요.`, {
-    onUndo: () => {
+  const undo = () => {
       state.events = state.events.filter((event) => event.id !== created.id);
       restoreEntry(state.claims, taskId, previousClaim);
       restoreEntry(state.subtaskProgress, taskId, previousProgress);
       restoreEntry(state.postponed, taskId, previousPostponed);
       saveState("완료를 되돌렸어요.");
-    },
-  });
+  };
+  const message = memberId === "together" ? "함께 완료했어요. 두 분 모두 수고했어요!" : `${nameFor(memberId)}의 완료로 기록했어요.`;
+  saveState(message, options.quick ? {
+    actions: [
+      { label: "완료자 변경", onClick: () => openCompletionEdit(created.id) },
+      { label: "되돌리기", onClick: undo },
+    ],
+  } : { onUndo: undo });
+}
+
+function openCompletionEdit(eventId) {
+  const completion = state.events.find((event) => event.id === eventId && event.eventType === "completed");
+  if (!completion) return;
+  ui.modal = "complete";
+  ui.modalData = { taskId: completion.taskId, eventId };
+  ui.completionMember = completion.memberId;
+  renderModal();
+}
+
+function updateCompletionEvent(eventId, memberId, note) {
+  const completion = state.events.find((event) => event.id === eventId && event.eventType === "completed");
+  if (!completion) return closeModal();
+  completion.memberId = ["wife", "husband", "together"].includes(memberId) ? memberId : state.currentMember;
+  completion.note = note;
+  closeModal(false);
+  saveState("완료자와 메모를 바꿨어요.");
 }
 
 function triggerBottle() {
@@ -2144,6 +2533,11 @@ function triggerBottle() {
   saveState("젖병과 쪽쪽이·치발기 소독을 오늘 할 일에 넣었어요.");
 }
 
+function dismissBottlePrompt() {
+  state.household.bottlePromptDismissedOn = operationalDate();
+  saveState("오늘은 젖병 소독 할 일을 만들지 않을게요.");
+}
+
 function undoEvent(eventId) {
   const event = state.events.find((item) => item.id === eventId);
   if (!event) return;
@@ -2156,14 +2550,25 @@ function undoEvent(eventId) {
 function saveTaskFromForm(form) {
   const taskId = String(form.get("taskId") || "");
   const recurrence = String(form.get("recurrence"));
+  const existingTask = taskId ? getTask(taskId) : null;
+  const subtasks = String(form.get("subtasks") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0, 12);
+  const weekdays = form.getAll("weekdays").map(Number).filter((day) => day >= 0 && day <= 6);
+  const pausedUntil = String(form.get("pausedUntil") || "");
+  let kind = existingTask?.kind || "action";
+  if (subtasks.length && !["group", "check-group"].includes(kind)) kind = kind === "check" ? "check-group" : "group";
+  if (!subtasks.length && ["group", "check-group"].includes(kind)) kind = kind === "check-group" ? "check" : "action";
   const values = {
     title: String(form.get("title") || "").trim(),
     description: String(form.get("description") || "").trim(),
     recurrence,
     estimate: Math.max(1, Number(form.get("estimate") || 10)),
-    intervalDays: recurrence === "weekly" ? 7 : recurrence === "biweekly" ? 14 : undefined,
+    intervalDays: recurrence === "weekly" ? 7 : recurrence === "biweekly" ? 14 : recurrence === "interval" ? Math.max(2, Math.min(365, Number(form.get("intervalDays") || 7))) : undefined,
     minDays: recurrence === "window" ? 2 : undefined,
     maxDays: recurrence === "window" ? 3 : undefined,
+    weekdays: recurrence === "weekdays" ? (weekdays.length ? weekdays : [new Date().getDay()]) : undefined,
+    subtasks,
+    kind,
+    pausedUntil: /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil > operationalDate() ? pausedUntil : "",
   };
   if (!values.title) return;
 
@@ -2173,7 +2578,7 @@ function saveTaskFromForm(form) {
     else state.taskOverrides[taskId] = { ...(state.taskOverrides[taskId] || {}), ...values };
   } else {
     const id = `custom-${Date.now()}`;
-    state.customTasks.push({ id, category: "living", icon: "sparkle", kind: "action", active: true, ...values });
+    state.customTasks.push({ id, category: "living", icon: "sparkle", active: true, ...values });
     state.events.push({ id: `baseline-${id}`, taskId: id, eventType: "baseline", memberId: null, createdAt: new Date().toISOString(), note: "" });
   }
   closeModal(false);
@@ -2270,24 +2675,27 @@ function closeModal(shouldRender = true) {
 
 function toast(message, options = {}) {
   const root = document.getElementById("toast-root");
-  if (typeof options.onUndo === "function") root.querySelectorAll(".toast.has-action").forEach((toastNode) => toastNode.remove());
+  const actions = Array.isArray(options.actions)
+    ? options.actions.filter((action) => action && typeof action.onClick === "function")
+    : typeof options.onUndo === "function" ? [{ label: options.actionLabel || "되돌리기", onClick: options.onUndo }] : [];
+  if (actions.length) root.querySelectorAll(".toast.has-action").forEach((toastNode) => toastNode.remove());
   const node = document.createElement("div");
-  node.className = `toast${typeof options.onUndo === "function" ? " has-action" : ""}`;
+  node.className = `toast${actions.length ? " has-action" : ""}`;
   const text = document.createElement("span");
   text.textContent = message;
   node.appendChild(text);
-  if (typeof options.onUndo === "function") {
+  for (const action of actions) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = options.actionLabel || "되돌리기";
+    button.textContent = action.label || "확인";
     button.addEventListener("click", () => {
       node.remove();
-      options.onUndo();
+      action.onClick();
     }, { once: true });
     node.appendChild(button);
   }
   root.appendChild(node);
-  window.setTimeout(() => node.remove(), options.onUndo ? 10000 : 3100);
+  window.setTimeout(() => node.remove(), actions.length ? 10000 : 3100);
 }
 
 const requestedPage = new URLSearchParams(window.location.search).get("page");
@@ -2304,8 +2712,22 @@ window.addEventListener("online", async () => {
 
 window.addEventListener("offline", () => {
   connectionAvailable = false;
+  syncInfo.status = "offline";
   render();
   toast("오프라인이에요. 체크한 내용은 이 기기에 안전하게 저장할게요.");
+});
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  if (auth.authenticated) render();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  localStorage.setItem(INSTALL_HINT_DISMISSED_KEY, "1");
+  if (auth.authenticated) render();
+  toast("도란도란을 홈 화면에 설치했어요.");
 });
 
 registerAppWorker();

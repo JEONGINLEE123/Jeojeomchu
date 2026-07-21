@@ -80,6 +80,30 @@ function ensureDailyBackup(state) {
   for (const old of backups.slice(31)) fs.unlinkSync(path.join(BACKUP_DIR, old));
 }
 
+function listBackupSnapshots() {
+  try {
+    return fs.readdirSync(BACKUP_DIR)
+      .filter((name) => /^\d{4}-\d{2}-\d{2}\.json$/.test(name))
+      .sort()
+      .reverse()
+      .map((name) => {
+        const file = path.join(BACKUP_DIR, name);
+        return { date: name.slice(0, 10), size: fs.statSync(file).size };
+      });
+  } catch {
+    return [];
+  }
+}
+
+function readBackupSnapshot(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(BACKUP_DIR, `${date}.json`), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function writeState(state) {
   ensureDailyBackup(readState() || state);
   writeJsonAtomic(DATA_FILE, state);
@@ -116,7 +140,7 @@ function mergeStates(current, incoming) {
   if (!current) return incoming;
   const result = { ...current, ...incoming };
 
-  for (const field of ["household", "customTasks"]) {
+  for (const field of ["household", "customTasks", "shoppingHistory"]) {
     result[field] = fieldTimestamp(incoming, field) >= fieldTimestamp(current, field) ? incoming[field] : current[field];
   }
 
@@ -150,7 +174,16 @@ function mergeStates(current, incoming) {
     .filter(Boolean)
     .sort((left, right) => new Date(left) - new Date(right));
   result.startedAt = startedAtCandidates[0] || new Date().toISOString();
-  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 6);
+  const historyMap = new Map();
+  for (const item of [...(current.shoppingHistory || []), ...(incoming.shoppingHistory || [])]) {
+    const key = `${String(item.name || "").trim().toLocaleLowerCase("ko-KR")}|${item.category || "other"}`;
+    const existing = historyMap.get(key);
+    if (!existing || new Date(item.lastBoughtAt || 0) >= new Date(existing.lastBoughtAt || 0)) historyMap.set(key, item);
+  }
+  result.shoppingHistory = [...historyMap.values()]
+    .sort((left, right) => new Date(right.lastBoughtAt || 0) - new Date(left.lastBoughtAt || 0))
+    .slice(0, 40);
+  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 7);
   result.clientId = incoming.clientId;
   result.updatedAt = Math.max(Date.now(), Number(current.updatedAt || 0) + 1, Number(incoming.updatedAt || 0));
   return result;
@@ -328,7 +361,8 @@ async function checkScheduledNotifications() {
       } else if (clock.minutes >= morning && clock.minutes < evening && record.lastSent.morning !== clock.date) {
         kind = "morning";
         const count = summaryIsCurrent ? Number(summary.remaining || 0) : 0;
-        payload = { title: "오늘의 집안일", body: count ? `오늘 살펴볼 일 ${count}개가 있어요.` : "오늘의 집안일을 가볍게 확인해 보세요.", url: "/", tag: `morning-${clock.date}` };
+        const scheduleNote = summary.needsDaysOff ? " 아빠의 다음 2주 휴무도 입력해 주세요." : "";
+        payload = { title: "오늘의 집안일", body: `${count ? `오늘 살펴볼 일 ${count}개가 있어요.` : "오늘의 집안일을 가볍게 확인해 보세요."}${scheduleNote}`, url: summary.needsDaysOff ? "/?page=settings" : "/", tag: `morning-${clock.date}` };
       }
       if (!payload) {
         kept.push(record);
@@ -490,7 +524,7 @@ function handleStatePost(request, response) {
 function handleStateReplace(request, response) {
   readJsonBody(request, (error, incoming) => {
     if (error || !incoming || !Array.isArray(incoming.events)) return sendJson(response, 400, { ok: false, error: "invalid_state" });
-    const replaced = { ...incoming, version: 6, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
+    const replaced = { ...incoming, version: 7, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
     ensureDailyBackup(readState());
     writeJsonAtomic(DATA_FILE, replaced);
     broadcast(replaced);
@@ -551,6 +585,17 @@ const server = http.createServer((request, response) => {
   }
   if (pathname === "/api/state" && request.method === "POST") return handleStatePost(request, response);
   if (pathname === "/api/state/replace" && request.method === "POST") return handleStateReplace(request, response);
+  if (pathname === "/api/backups" && request.method === "GET") {
+    sendJson(response, 200, { backups: listBackupSnapshots() });
+    return;
+  }
+  if (pathname.startsWith("/api/backups/") && request.method === "GET") {
+    const date = pathname.slice("/api/backups/".length);
+    const snapshot = readBackupSnapshot(date);
+    if (!snapshot) return sendJson(response, 404, { ok: false, error: "backup_not_found" });
+    sendJson(response, 200, { state: snapshot });
+    return;
+  }
   if (pathname === "/api/backup" && request.method === "GET") {
     const state = readState();
     if (!state) return sendJson(response, 404, { ok: false, error: "no_state" });
