@@ -635,6 +635,19 @@ button,
   line-height: 1.6;
 }
 
+.completion-note {
+  max-width: 100%;
+  margin: 9px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid #b8d3c8;
+  border-radius: 0 8px 8px 0;
+  color: #50675f;
+  background: #f2f7f4;
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
 .claim-label {
   display: inline-flex;
   align-items: center;

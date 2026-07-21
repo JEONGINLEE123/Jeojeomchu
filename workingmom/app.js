@@ -1295,7 +1295,11 @@ function renderCompletedSection(events) {
         if (!task) return "";
         return `<article class="task-card completed-card">
           <div class="task-icon small ${task.category}">✓</div>
-          <div class="task-main"><h3 class="task-title">${escapeHtml(task.title)}</h3><p class="task-description">${event.eventType === "not_needed" ? "아직 괜찮다고 점검" : event.memberId === "together" ? `${escapeHtml(nameFor(event.memberId))} 완료` : `${escapeHtml(subjectName(event.memberId))} 완료`} · ${formatTime(event.createdAt)}</p></div>
+          <div class="task-main">
+            <h3 class="task-title">${escapeHtml(task.title)}</h3>
+            <p class="task-description">${event.eventType === "not_needed" ? "아직 괜찮다고 점검" : event.memberId === "together" ? `${escapeHtml(nameFor(event.memberId))} 완료` : `${escapeHtml(subjectName(event.memberId))} 완료`} · ${formatTime(event.createdAt)}</p>
+            ${event.note ? `<p class="completion-note">“${escapeHtml(event.note)}”</p>` : ""}
+          </div>
           <div class="task-actions"><button class="btn ghost" data-page="history">기록 보기</button></div>
         </article>`;
       }).join("")}</div>` : `<div class="empty-state"><strong>첫 체크를 기다리고 있어요</strong>작은 일 하나를 끝내면 여기에 따뜻하게 기록해둘게요.</div>`}
