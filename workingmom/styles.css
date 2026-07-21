@@ -863,6 +863,41 @@ button,
   box-shadow: 0 0 0 3px var(--green-soft);
 }
 
+.status-dot.recovery {
+  background: #8b78a8;
+  box-shadow: 0 0 0 3px rgba(139, 120, 168, 0.16);
+}
+
+.schedule-card.recovering {
+  border-color: #d8cce6;
+  background: #f7f3fb;
+  box-shadow: 0 0 0 3px rgba(139, 120, 168, 0.08);
+}
+
+.recovery-callout {
+  display: grid;
+  gap: 3px;
+  margin: 14px 0 0;
+  padding: 10px 11px;
+  border-radius: 10px;
+  color: #5f4d78;
+  background: #eee7f5;
+}
+
+.recovery-callout.light {
+  color: #745d31;
+  background: #f5ead4;
+}
+
+.recovery-callout strong {
+  font-size: 10px;
+}
+
+.recovery-callout span {
+  font-size: 9px;
+  line-height: 1.55;
+}
+
 .schedule-note {
   margin: 12px 0 0;
   color: var(--muted);
@@ -1536,6 +1571,44 @@ button,
   padding-bottom: 12px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.recovery-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 14px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #ded5e8;
+  border-radius: 12px;
+  background: #faf7fd;
+}
+
+.recovery-setting > div {
+  display: grid;
+  gap: 4px;
+}
+
+.recovery-setting strong {
+  font-size: 12px;
+}
+
+.recovery-setting span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.history-recovery-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #ded5e8;
+  border-radius: 10px;
+  color: #67587b;
+  background: #faf7fd;
+  font-size: 10px;
+  line-height: 1.6;
 }
 
 .offday-grid {
@@ -3023,5 +3096,9 @@ button,
   .offday-calendar-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .recovery-setting {
+    grid-template-columns: 1fr;
   }
 }

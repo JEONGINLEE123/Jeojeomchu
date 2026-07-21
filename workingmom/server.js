@@ -44,7 +44,21 @@ const MIME = {
 
 function readState() {
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    if (Number(parsed.version || 1) < 8) {
+      const migratedAt = Number(parsed.updatedAt || 0) + 1;
+      parsed.household ||= {};
+      parsed.household.workSchedule ||= {};
+      parsed.household.workSchedule.wife ||= {};
+      parsed.household.workSchedule.wife.nightDays = [1, 2];
+      parsed.household.workSchedule.wife.recoveryEnd = "18:00";
+      parsed.syncMeta ||= { fields: {}, objects: {} };
+      parsed.syncMeta.fields ||= {};
+      parsed.syncMeta.fields.household = Math.max(migratedAt, Number(parsed.syncMeta.fields.household || 0));
+      parsed.version = 8;
+      parsed.updatedAt = migratedAt;
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -183,7 +197,7 @@ function mergeStates(current, incoming) {
   result.shoppingHistory = [...historyMap.values()]
     .sort((left, right) => new Date(right.lastBoughtAt || 0) - new Date(left.lastBoughtAt || 0))
     .slice(0, 40);
-  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 7);
+  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 8);
   result.clientId = incoming.clientId;
   result.updatedAt = Math.max(Date.now(), Number(current.updatedAt || 0) + 1, Number(incoming.updatedAt || 0));
   return result;
@@ -253,6 +267,8 @@ function memberName(state, memberId) {
 
 async function notifyPartnerChanges(previous, next) {
   if (!previous || !next?.household?.partnerAlerts) return;
+  const wifeRecovering = wifeIsRecovering(next);
+  const canNotify = (record, excludedMemberId) => record.memberId !== excludedMemberId && !(record.memberId === "wife" && wifeRecovering);
   const previousEventIds = new Set((previous.events || []).map((event) => event.id));
   const completion = (next.events || []).find((event) => event.eventType === "completed" && !previousEventIds.has(event.id));
   if (completion && completion.memberId !== "together") {
@@ -261,7 +277,7 @@ async function notifyPartnerChanges(previous, next) {
       body: `${memberName(next, completion.memberId)}이(가) 완료했어요. 서로의 수고를 확인해 보세요.`,
       url: "/?page=history",
       tag: `completion-${completion.id}`,
-    }, (record) => record.memberId !== completion.memberId);
+    }, (record) => canNotify(record, completion.memberId));
     return;
   }
   for (const [taskId, claim] of Object.entries(next.claims || {})) {
@@ -271,7 +287,7 @@ async function notifyPartnerChanges(previous, next) {
         body: `${memberName(next, claim.memberId)}이(가) 집안일 하나를 맡았어요.`,
         url: "/",
         tag: `claim-${taskId}-${claim.claimedAt}`,
-      }, (record) => record.memberId !== claim.memberId);
+      }, (record) => canNotify(record, claim.memberId));
       break;
     }
   }
@@ -336,6 +352,16 @@ function timeToMinutes(value, fallback) {
   return match ? Number(match[1]) * 60 + Number(match[2]) : fallback;
 }
 
+function wifeIsRecovering(state, clock = seoulClock()) {
+  const schedule = state?.household?.workSchedule?.wife || {};
+  const nightDays = (schedule.nightDays || []).map(Number);
+  const day = new Date(`${clock.date}T00:00:00Z`).getUTCDay();
+  const previousDay = (day + 6) % 7;
+  const shiftEnd = timeToMinutes(schedule.end, 8 * 60);
+  const recoveryEnd = timeToMinutes(schedule.recoveryEnd, 18 * 60);
+  return nightDays.includes(previousDay) && clock.minutes >= shiftEnd && clock.minutes < recoveryEnd;
+}
+
 let notificationCheckRunning = false;
 async function checkScheduledNotifications() {
   if (notificationCheckRunning || !pushConfiguration.enabled) return;
@@ -348,6 +374,7 @@ async function checkScheduledNotifications() {
     const morning = timeToMinutes(state.household?.morningAlert, 9 * 60);
     const evening = timeToMinutes(state.household?.eveningAlert, 20 * 60 + 30);
     const summary = state.notificationSummary || {};
+    const wifeRecovering = wifeIsRecovering(state, clock);
     let changed = false;
     const kept = [];
     for (const record of data.subscriptions) {
@@ -366,6 +393,12 @@ async function checkScheduledNotifications() {
       }
       if (!payload) {
         kept.push(record);
+        continue;
+      }
+      if (record.memberId === "wife" && wifeRecovering) {
+        record.lastSent[kind] = clock.date;
+        kept.push(record);
+        changed = true;
         continue;
       }
       const status = await sendPush(record, payload);
@@ -524,7 +557,7 @@ function handleStatePost(request, response) {
 function handleStateReplace(request, response) {
   readJsonBody(request, (error, incoming) => {
     if (error || !incoming || !Array.isArray(incoming.events)) return sendJson(response, 400, { ok: false, error: "invalid_state" });
-    const replaced = { ...incoming, version: 7, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
+    const replaced = { ...incoming, version: 8, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
     ensureDailyBackup(readState());
     writeJsonAtomic(DATA_FILE, replaced);
     broadcast(replaced);

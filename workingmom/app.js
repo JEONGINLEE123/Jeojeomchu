@@ -216,7 +216,7 @@ function makeInitialState() {
   }));
 
   return {
-    version: 7,
+    version: 8,
     clientId: `client-${Math.random().toString(36).slice(2)}`,
     updatedAt: now,
     startedAt: new Date(now).toISOString(),
@@ -231,7 +231,7 @@ function makeInitialState() {
       partnerAlerts: false,
       bottlePromptDismissedOn: "",
       workSchedule: {
-        wife: { nightDays: [2, 3], start: "23:00", end: "08:00" },
+        wife: { nightDays: [1, 2], start: "23:00", end: "08:00", recoveryEnd: "18:00" },
         husband: { start: "10:30", end: "21:30", daysOff: [] },
       },
     },
@@ -246,7 +246,7 @@ function makeInitialState() {
     deletedEventIds: {},
     shoppingDeletedIds: {},
     syncMeta: { fields: {}, objects: {} },
-    notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [], needsDaysOff: false },
+    notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [], needsDaysOff: false, wifeRecovering: false, recoveryUntil: "" },
   };
 }
 
@@ -307,7 +307,14 @@ function migrateState(input = {}) {
     migrated.startedAt = new Date(recordedDates.length ? Math.min(...recordedDates) : Date.now()).toISOString();
   }
   if (!Array.isArray(migrated.shoppingHistory)) migrated.shoppingHistory = [];
-  migrated.version = 7;
+  if (version < 8) {
+    migrated.household ||= {};
+    migrated.household.workSchedule ||= {};
+    migrated.household.workSchedule.wife ||= {};
+    migrated.household.workSchedule.wife.nightDays = [1, 2];
+    migrated.household.workSchedule.wife.recoveryEnd = "18:00";
+  }
+  migrated.version = 8;
   return migrated;
 }
 
@@ -339,7 +346,7 @@ function normalizeState(input = {}, overrides = {}) {
     ...base,
     ...input,
     ...overrides,
-    version: 7,
+    version: 8,
     household: {
       ...base.household,
       ...household,
@@ -403,7 +410,7 @@ function saveState(message, options = {}) {
   try { previous = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); } catch { previous = null; }
   const now = Date.now();
   stampStateChanges(previous, now);
-  state.version = 7;
+  state.version = 8;
   state.updatedAt = now;
   state.notificationSummary = buildNotificationSummary();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -556,6 +563,7 @@ function pushStatusText() {
   if (!USE_REMOTE_SERVER) return "배포된 주소에서 알림을 연결할 수 있어요.";
   if (pushInfo.permission === "denied") return "브라우저 설정에서 이 사이트의 알림 권한을 다시 허용해 주세요.";
   if (!pushInfo.supported) return "이 브라우저에서는 푸시 알림을 사용할 수 없어요. 홈 화면에 설치한 뒤 다시 확인해 주세요.";
+  if (pushInfo.enabled && memberScheduleStatus("wife").recovering && state.currentMember === "wife") return `${clockLabel(state.household.workSchedule.wife.recoveryEnd || "18:00")}까지 회복 시간이라 알림을 쉬어요.`;
   if (pushInfo.enabled) return `오전 ${state.household.morningAlert} 요약과 저녁 남은 일 알림을 받아요.`;
   return "한 번만 허용하면 앱을 닫아도 정한 시각에 알려드려요.";
 }
@@ -823,12 +831,15 @@ function dueTasks() {
 
 function buildNotificationSummary() {
   const due = dueTasks();
+  const wife = memberScheduleStatus("wife");
   return {
     date: operationalDate(),
     remaining: due.length,
     overdue: due.filter(({ status }) => status.key === "overdue").length,
     titles: due.slice(0, 3).map(({ task }) => task.title),
     needsDaysOff: needsDaysOffPlan(),
+    wifeRecovering: Boolean(wife.recovering),
+    recoveryUntil: wife.recovering ? state.household.workSchedule.wife.recoveryEnd || "18:00" : "",
   };
 }
 
@@ -917,13 +928,18 @@ function memberScheduleStatus(memberId, now = new Date()) {
     const nightDays = (schedule.nightDays || []).map(Number);
     const start = timeToMinutes(schedule.start);
     const end = timeToMinutes(schedule.end);
+    const recoveryEnd = timeToMinutes(schedule.recoveryEnd || "18:00");
     const previousDay = (day + 6) % 7;
     const finishingPreviousShift = nightDays.includes(previousDay) && currentMinutes < end;
+    const recoveryDay = nightDays.includes(previousDay);
+    const recovering = recoveryDay && currentMinutes >= end && currentMinutes < recoveryEnd;
     const startedTonight = nightDays.includes(day) && currentMinutes >= start;
-    if (finishingPreviousShift) return { working: true, dayOff: false, tone: "busy", label: `근무 중 · ${clockLabel(schedule.end)} 퇴근` };
-    if (startedTonight) return { working: true, dayOff: false, tone: "busy", label: `근무 중 · 내일 ${clockLabel(schedule.end)} 퇴근` };
-    if (nightDays.includes(day)) return { working: false, dayOff: false, tone: "soon", label: `오늘 ${clockLabel(schedule.start)} 출근` };
-    return { working: false, dayOff: true, tone: "free", label: "오늘 야간근무 없음" };
+    if (finishingPreviousShift) return { working: true, recovering: false, lightOnly: false, dayOff: false, tone: "busy", label: `근무 중 · ${clockLabel(schedule.end)} 퇴근` };
+    if (recovering) return { working: false, recovering: true, lightOnly: false, dayOff: false, tone: "recovery", label: `야간근무 후 회복 · ${clockLabel(schedule.recoveryEnd || "18:00")}까지` };
+    if (startedTonight) return { working: true, recovering: false, lightOnly: false, dayOff: false, tone: "busy", label: `근무 중 · 내일 ${clockLabel(schedule.end)} 퇴근` };
+    if (nightDays.includes(day) && recoveryDay) return { working: false, recovering: false, lightOnly: true, dayOff: false, tone: "soon", label: `오늘 ${clockLabel(schedule.start)} 출근 · 가벼운 일만` };
+    if (nightDays.includes(day)) return { working: false, recovering: false, lightOnly: false, dayOff: false, tone: "soon", label: `오늘 ${clockLabel(schedule.start)} 출근` };
+    return { working: false, recovering: false, lightOnly: false, dayOff: true, tone: "free", label: "오늘 야간근무 없음" };
   }
 
   const schedule = schedules.husband;
@@ -937,11 +953,28 @@ function memberScheduleStatus(memberId, now = new Date()) {
   return { working: false, dayOff: false, tone: "free", label: "오늘 근무 마침" };
 }
 
+function isWifeRecoveryDate(dateKey) {
+  const day = new Date(`${dateKey}T12:00:00`).getDay();
+  const previousDay = (day + 6) % 7;
+  return (state.household.workSchedule.wife.nightDays || []).map(Number).includes(previousDay);
+}
+
 function taskTimingHint(task) {
   const wife = memberScheduleStatus("wife");
   const husband = memberScheduleStatus("husband");
   const isHeavy = Number(task.estimate || 0) >= 25 || ["group", "check-group"].includes(task.kind);
 
+  if (wife.recovering) {
+    if (!husband.working) return `지금은 ${subjectName("husband")} 먼저 살펴보기 좋아요`;
+    return isHeavy
+      ? `${nameFor("wife")} 회복 시간 · 무거운 일은 다음 여유일에 해요`
+      : `${nameFor("wife")} 회복 시간 · 오후 6시 이후 살펴봐요`;
+  }
+  if (wife.lightOnly) {
+    return isHeavy
+      ? `${nameFor("wife")} 오늘 밤 근무 · 무거운 일은 다음 여유일에 해요`
+      : `${nameFor("wife")} 밤 11시 출근 · 가벼운 일만 해요`;
+  }
   if (isHeavy) {
     if (husband.dayOff && !wife.working) return `오늘은 ${nameFor("wife")}·${nameFor("husband")}가 함께하기 좋아요`;
     if (husband.working) return `${nameFor("husband")} 퇴근 후 함께하면 수월해요`;
@@ -1295,12 +1328,15 @@ function renderScheduleCard() {
     .filter((date) => date >= today)
     .sort()[0];
   const needsPlan = needsDaysOffPlan();
+  const rhythmTitle = wife.recovering ? "오늘은 회복이<br>먼저예요" : wife.lightOnly ? "저녁에는<br>가벼운 일만" : "가능한 시간에<br>서로 조금씩";
   return `
-    <section class="sidebar-card schedule-card ${needsPlan ? "needs-plan" : ""}">
+    <section class="sidebar-card schedule-card ${needsPlan ? "needs-plan" : ""} ${wife.recovering ? "recovering" : ""}">
       <div class="schedule-heading">
-        <div><p class="sidebar-label">오늘의 근무 리듬</p><h2 class="sidebar-title">가능한 시간에<br>서로 조금씩</h2></div>
+        <div><p class="sidebar-label">오늘의 근무 리듬</p><h2 class="sidebar-title">${rhythmTitle}</h2></div>
         <span class="schedule-icon">◷</span>
       </div>
+      ${wife.recovering ? `<p class="recovery-callout"><strong>${escapeHtml(nameFor("wife"))} 회복 시간</strong><span>오전 8시부터 오후 6시까지 추천과 알림을 잠시 쉬어요.</span></p>` : ""}
+      ${wife.lightOnly ? `<p class="recovery-callout light"><strong>오후 6시 이후</strong><span>밤 11시 출근 전에는 가벼운 일만 권해요.</span></p>` : ""}
       <div class="schedule-people">
         <div class="schedule-person">
           <span class="avatar">${escapeHtml(nameFor("wife").slice(0, 1))}</span>
@@ -1648,6 +1684,7 @@ function renderHistory() {
   const isToday = ui.historyDate === today;
   const handledCount = data.completed.length + data.checked.length;
   const hasResettable = handledCount || data.postponed.length;
+  const recoveryDate = isWifeRecoveryDate(ui.historyDate);
 
   return `
     <div class="inner-page history-page">
@@ -1665,6 +1702,7 @@ function renderHistory() {
             <div><strong>${data.checked.length}</strong><span>점검</span></div>
             <div class="missed"><strong>${data.missed.length}</strong><span>${isToday ? "아직 안 함" : "하지 않음"}</span></div>
           </div>
+          ${recoveryDate ? `<p class="history-recovery-note"><strong>${escapeHtml(nameFor("wife"))} 회복일</strong> · 오전 8시~오후 6시는 아내 몫의 미완료 부담으로 계산하지 않아요.</p>` : ""}
 
           <section class="history-detail-section">
             <div class="history-detail-title"><h3>완료한 일</h3><span>누가 했는지 함께 보여드려요</span></div>
@@ -1784,6 +1822,7 @@ function renderSettings() {
           <div class="work-schedule-control">
             <div class="weekday-picker">${weekdayNames.map((day, index) => `<button class="weekday-btn ${(wifeSchedule.nightDays || []).map(Number).includes(index) ? "active" : ""}" data-action="toggle-night-day" data-day="${index}">${day}</button>`).join("")}</div>
             <div class="time-pair"><label class="field-label">출근<input type="time" class="form-control" data-work-member="wife" data-work-field="start" value="${wifeSchedule.start}"></label><span>→</span><label class="field-label">퇴근<input type="time" class="form-control" data-work-member="wife" data-work-field="end" value="${wifeSchedule.end}"></label></div>
+            <div class="recovery-setting"><div><strong>야간근무 후 회복 시간</strong><span>퇴근한 날에는 이 시각까지 아내 대상 추천과 알림을 쉬어요.</span></div><label class="field-label">회복 종료<input type="time" class="form-control" data-work-member="wife" data-work-field="recoveryEnd" value="${wifeSchedule.recoveryEnd || "18:00"}"></label></div>
           </div>
         </div>
         <div class="setting-row">
