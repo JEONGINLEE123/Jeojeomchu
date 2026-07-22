@@ -5,6 +5,11 @@ const DEVICE_LOGGED_OUT_KEY = "doran-device-logged-out-v1";
 const INSTALL_HINT_DISMISSED_KEY = "doran-install-hint-dismissed-v1";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHOPPING_CATEGORIES = { food: "식품", baby: "육아", living: "생활", other: "기타" };
+const FINANCE_CATEGORIES = {
+  food: "식비", baby: "육아", living: "생활용품", transport: "교통",
+  housing: "주거·공과금", medical: "의료", leisure: "여가", education: "교육", other: "기타",
+};
+const PAYMENT_METHODS = { card: "카드", cash: "현금", transfer: "계좌이체", other: "기타", unknown: "미확인" };
 const QUICK_SHOPPING_ITEMS = [
   { name: "우유", category: "food" },
   { name: "계란", category: "food" },
@@ -165,6 +170,7 @@ let syncInfo = { status: navigator.onLine ? "idle" : "offline", lastSyncedAt: 0 
 let deferredInstallPrompt = null;
 let updateAvailable = false;
 let backupSnapshots = { loading: false, loaded: false, items: [], error: "" };
+let financeInfo = { aiEnabled: null, analyzing: false };
 let ui = {
   page: "today",
   filter: "all",
@@ -175,6 +181,7 @@ let ui = {
   completionMember: state.currentMember,
   shoppingTrip: false,
   settingsSection: "",
+  financeMonth: operationalDate().slice(0, 7),
 };
 
 let channel = null;
@@ -216,7 +223,7 @@ function makeInitialState() {
   }));
 
   return {
-    version: 8,
+    version: 9,
     clientId: `client-${Math.random().toString(36).slice(2)}`,
     updatedAt: now,
     startedAt: new Date(now).toISOString(),
@@ -243,8 +250,13 @@ function makeInitialState() {
     customTasks: [],
     shoppingItems: [],
     shoppingHistory: [],
+    expenses: [],
+    recurringExpenses: [],
+    financeSettings: { monthlyBudget: 0 },
     deletedEventIds: {},
     shoppingDeletedIds: {},
+    expenseDeletedIds: {},
+    recurringExpenseDeletedIds: {},
     syncMeta: { fields: {}, objects: {} },
     notificationSummary: { date: "", remaining: 0, overdue: 0, titles: [], needsDaysOff: false, wifeRecovering: false, recoveryUntil: "" },
   };
@@ -314,7 +326,14 @@ function migrateState(input = {}) {
     migrated.household.workSchedule.wife.nightDays = [1, 2];
     migrated.household.workSchedule.wife.recoveryEnd = "18:00";
   }
-  migrated.version = 8;
+  if (version < 9) {
+    migrated.expenses ||= [];
+    migrated.recurringExpenses ||= [];
+    migrated.financeSettings ||= { monthlyBudget: 0 };
+    migrated.expenseDeletedIds ||= {};
+    migrated.recurringExpenseDeletedIds ||= {};
+  }
+  migrated.version = 9;
   return migrated;
 }
 
@@ -330,6 +349,11 @@ function normalizeState(input = {}, overrides = {}) {
     ...item,
     updatedAt: Number(item.updatedAt || new Date(item.checkedAt || item.createdAt || timestamp).getTime() || timestamp),
   }));
+  const normalizeFinanceItems = (items) => (Array.isArray(items) ? items : []).map((item) => ({
+    ...item,
+    amount: Math.max(0, Math.round(Number(item.amount || 0))),
+    updatedAt: Number(item.updatedAt || new Date(item.createdAt || timestamp).getTime() || timestamp),
+  }));
   const syncMeta = {
     fields: { ...(input.syncMeta?.fields || {}) },
     objects: { ...(input.syncMeta?.objects || {}) },
@@ -341,12 +365,13 @@ function normalizeState(input = {}, overrides = {}) {
   syncMeta.fields.household ||= timestamp;
   syncMeta.fields.customTasks ||= timestamp;
   syncMeta.fields.shoppingHistory ||= timestamp;
+  syncMeta.fields.financeSettings ||= timestamp;
 
   return {
     ...base,
     ...input,
     ...overrides,
-    version: 8,
+    version: 9,
     household: {
       ...base.household,
       ...household,
@@ -361,8 +386,13 @@ function normalizeState(input = {}, overrides = {}) {
     customTasks: Array.isArray(input.customTasks) ? input.customTasks : [],
     shoppingItems,
     shoppingHistory: (Array.isArray(input.shoppingHistory) ? input.shoppingHistory : []).slice(0, 40),
+    expenses: normalizeFinanceItems(input.expenses),
+    recurringExpenses: normalizeFinanceItems(input.recurringExpenses),
+    financeSettings: { ...base.financeSettings, ...(input.financeSettings || {}) },
     deletedEventIds: { ...(input.deletedEventIds || {}) },
     shoppingDeletedIds: { ...(input.shoppingDeletedIds || {}) },
+    expenseDeletedIds: { ...(input.expenseDeletedIds || {}) },
+    recurringExpenseDeletedIds: { ...(input.recurringExpenseDeletedIds || {}) },
     syncMeta,
     notificationSummary: { ...base.notificationSummary, ...(input.notificationSummary || {}) },
   };
@@ -376,7 +406,7 @@ function stampStateChanges(previous, now) {
   state.syncMeta ||= { fields: {}, objects: {} };
   state.syncMeta.fields ||= {};
   state.syncMeta.objects ||= {};
-  for (const field of ["household", "customTasks", "shoppingHistory"]) {
+  for (const field of ["household", "customTasks", "shoppingHistory", "financeSettings"]) {
     if (jsonChanged(previous?.[field], state[field])) state.syncMeta.fields[field] = now;
   }
   for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
@@ -403,6 +433,14 @@ function stampStateChanges(previous, now) {
   for (const item of previous?.shoppingItems || []) {
     if (!currentShoppingIds.has(item.id)) state.shoppingDeletedIds[item.id] = now;
   }
+
+  for (const [itemsField, deletedField] of [["expenses", "expenseDeletedIds"], ["recurringExpenses", "recurringExpenseDeletedIds"]]) {
+    const before = new Map((previous?.[itemsField] || []).map((item) => [item.id, item]));
+    const currentIds = new Set((state[itemsField] || []).map((item) => item.id));
+    state[deletedField] ||= {};
+    for (const item of state[itemsField] || []) if (jsonChanged(before.get(item.id), item)) item.updatedAt = now;
+    for (const item of previous?.[itemsField] || []) if (!currentIds.has(item.id)) state[deletedField][item.id] = now;
+  }
 }
 
 function saveState(message, options = {}) {
@@ -410,7 +448,7 @@ function saveState(message, options = {}) {
   try { previous = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); } catch { previous = null; }
   const now = Date.now();
   stampStateChanges(previous, now);
-  state.version = 8;
+  state.version = 9;
   state.updatedAt = now;
   state.notificationSummary = buildNotificationSummary();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -1002,6 +1040,7 @@ function navIcon(name) {
     today: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M9 20v-6h6v6"/>',
     all: '<path d="M5 6h14M5 12h14M5 18h14"/><circle cx="3" cy="6" r=".4"/><circle cx="3" cy="12" r=".4"/><circle cx="3" cy="18" r=".4"/>',
     shopping: '<path d="M4 5h2l2 10h9l2-7H7"/><circle cx="10" cy="19" r="1"/><circle cx="17" cy="19" r="1"/>',
+    finance: '<path d="M4 7h16v12H4z"/><path d="M16 11h4v4h-4a2 2 0 1 1 0-4ZM7 7V5h10v2"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
     settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3a1.7 1.7 0 0 0 1.1 1.6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.37.37.7.6 1 .27.3.62.4 1 .4h.1v4H21a1.7 1.7 0 0 0-1.6.6Z"/>',
   };
@@ -1115,6 +1154,7 @@ function renderBottomNav() {
     ["today", "오늘"],
     ["all", "집안일"],
     ["shopping", "장보기"],
+    ["finance", "가계부"],
     ["history", "기록"],
     ["settings", "설정"],
   ];
@@ -1134,6 +1174,7 @@ function renderBottomNav() {
 function renderPage() {
   if (ui.page === "all") return renderAllTasks();
   if (ui.page === "shopping") return renderShopping();
+  if (ui.page === "finance") return renderFinance();
   if (ui.page === "history") return renderHistory();
   if (ui.page === "settings") return renderSettings();
   return renderToday();
@@ -1155,7 +1196,7 @@ function renderShopping() {
     <div class="inner-page shopping-page ${ui.shoppingTrip ? "trip-mode" : ""}">
       <header class="inner-header">
         <div><p class="eyebrow">잊지 않고 함께</p><h1>장보기 목록</h1><p>${remaining ? `살 것 ${remaining}개가 남아 있어요.` : items.length ? "모두 장바구니에 담았어요." : "필요한 것을 함께 적어두세요."}</p></div>
-        <div class="shopping-header-actions"><button class="btn ${ui.shoppingTrip ? "primary" : ""}" data-action="shopping-trip">${ui.shoppingTrip ? "장보기 끝내기" : "장보기 시작"}</button>${bought ? `<button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}</div>
+        <div class="shopping-header-actions"><button class="btn ${ui.shoppingTrip ? "primary" : ""}" data-action="shopping-trip">${ui.shoppingTrip ? "장보기 끝내기" : "장보기 시작"}</button>${bought ? `<button class="btn primary" data-action="shopping-to-expense">구매 금액 기록</button><button class="btn" data-action="shopping-clear-bought">산 품목 정리</button>` : ""}</div>
       </header>
       <section class="shopping-panel">
         <div class="quick-shopping shopping-setup">
@@ -1188,6 +1229,86 @@ function renderShoppingItem(item) {
       <span class="shopping-meta">${escapeHtml(subjectName(item.addedBy))} 추가${item.checked && item.checkedBy ? ` · ${escapeHtml(nameFor(item.checkedBy))} 구매` : ""}</span>
     </button>
     <div class="shopping-row-actions"><button data-action="shopping-edit" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 수정">수정</button><button class="shopping-delete" data-action="shopping-delete" data-shopping-id="${item.id}" aria-label="${escapeHtml(item.name)} 삭제">×</button></div>
+  </article>`;
+}
+
+function formatWon(amount) {
+  return `${Math.max(0, Math.round(Number(amount || 0))).toLocaleString("ko-KR")}원`;
+}
+
+function financeMemberLabel(member) {
+  if (member === "shared") return "공동 결제";
+  return `${escapeHtml(nameFor(member === "husband" ? "husband" : "wife"))} 결제`;
+}
+
+function renderFinance() {
+  const month = ui.financeMonth;
+  const currentMonth = operationalDate().slice(0, 7);
+  const monthExpenses = (state.expenses || []).filter((item) => String(item.date || "").slice(0, 7) === month)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const previousExpenses = (state.expenses || []).filter((item) => String(item.date || "").slice(0, 7) === shiftMonthKey(month, -1));
+  const householdExpenses = monthExpenses.filter((item) => item.scope !== "personal");
+  const total = householdExpenses.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const personalTotal = monthExpenses.filter((item) => item.scope === "personal").reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const previousTotal = previousExpenses.filter((item) => item.scope !== "personal").reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const difference = total - previousTotal;
+  const budget = Math.max(0, Number(state.financeSettings?.monthlyBudget || 0));
+  const categoryTotals = Object.keys(FINANCE_CATEGORIES).map((category) => ({
+    category,
+    amount: householdExpenses.filter((item) => (item.category || "other") === category).reduce((sum, item) => sum + Number(item.amount || 0), 0),
+  })).filter((item) => item.amount).sort((a, b) => b.amount - a.amount);
+  const payerTotals = ["wife", "husband", "shared"].map((paidBy) => ({
+    paidBy,
+    amount: householdExpenses.filter((item) => (item.paidBy || "shared") === paidBy).reduce((sum, item) => sum + Number(item.amount || 0), 0),
+  })).filter((item) => item.amount);
+  const budgetPercent = budget ? Math.min(100, Math.round(total / budget * 100)) : 0;
+  const grouped = new Map();
+  for (const expense of monthExpenses) {
+    if (!grouped.has(expense.date)) grouped.set(expense.date, []);
+    grouped.get(expense.date).push(expense);
+  }
+  const recurring = [...(state.recurringExpenses || [])].sort((a, b) => Number(a.dayOfMonth || 1) - Number(b.dayOfMonth || 1));
+  return `
+    <div class="inner-page finance-page">
+      <header class="inner-header finance-header">
+        <div><p class="eyebrow">우리 집 돈의 흐름</p><h1>가계부</h1><p>사진으로 빠르게, 필요할 때는 직접 기록해요.</p></div>
+        <div class="finance-header-actions">
+          <button class="btn receipt-button" data-action="receipt-select">📷 영수증 찍기</button>
+          <button class="btn primary" data-action="expense-add">직접 기록</button>
+          <input id="receipt-image-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden>
+        </div>
+      </header>
+      <p class="receipt-privacy">영수증 사진은 AI 분석 중에만 사용하고 우리 앱과 백업에는 저장하지 않아요.${financeInfo.aiEnabled === false ? " 지금은 AI 키가 연결되지 않아 직접 입력으로 이어집니다." : ""}</p>
+      <section class="finance-summary-card">
+        <div class="finance-month-nav"><button data-action="finance-prev-month" aria-label="이전 달">‹</button><strong>${formatHistoryMonth(month)}</strong><button data-action="finance-next-month" aria-label="다음 달" ${month >= currentMonth ? "disabled" : ""}>›</button></div>
+        <div class="finance-total"><span>생활비 지출</span><strong>${formatWon(total)}</strong><small>${previousTotal ? `지난달보다 ${difference === 0 ? "같아요" : `${formatWon(Math.abs(difference))} ${difference > 0 ? "더 썼어요" : "덜 썼어요"}`}` : "지난달 기록이 아직 없어요"}</small></div>
+        ${budget ? `<div class="budget-track"><div style="width:${budgetPercent}%"></div></div><div class="budget-copy"><span>예산 ${formatWon(budget)}</span><strong class="${total > budget ? "over" : ""}">${total > budget ? `${formatWon(total - budget)} 초과` : `${formatWon(budget - total)} 남음`}</strong></div>` : `<button class="budget-empty" data-action="budget-edit">이번 달 예산을 정해보세요 →</button>`}
+        ${budget ? `<button class="finance-inline-link" data-action="budget-edit">예산 수정</button>` : ""}
+      </section>
+      <section class="finance-grid">
+        <article class="finance-breakdown"><h2>분류별 생활비</h2>${categoryTotals.length ? `<div class="category-bars">${categoryTotals.map((item) => `<div><span>${FINANCE_CATEGORIES[item.category]}</span><i><b style="width:${Math.max(5, Math.round(item.amount / Math.max(total, 1) * 100))}%"></b></i><strong>${formatWon(item.amount)}</strong></div>`).join("")}</div>` : `<p class="finance-empty-copy">이번 달 생활비 기록이 없어요.</p>`}</article>
+        <article class="finance-breakdown"><h2>누가 결제했나요</h2>${payerTotals.length ? `<div class="payer-totals">${payerTotals.map((item) => `<div><span>${financeMemberLabel(item.paidBy)}</span><strong>${formatWon(item.amount)}</strong></div>`).join("")}</div>` : `<p class="finance-empty-copy">기록하면 두 사람의 결제 흐름을 볼 수 있어요.</p>`}${personalTotal ? `<p class="personal-total">개인 지출은 생활비 합계와 분리 · ${formatWon(personalTotal)}</p>` : ""}</article>
+      </section>
+      <section class="recurring-panel">
+        <div class="section-heading"><div><p class="eyebrow">자동으로 빠짐없이</p><h2>매달 고정비</h2></div><button class="btn" data-action="recurring-add">고정비 추가</button></div>
+        ${recurring.length ? `<div class="recurring-list">${recurring.map((item) => `<article class="recurring-row ${item.active === false ? "inactive" : ""}"><div><strong>${escapeHtml(item.title)}</strong><span>매월 ${Number(item.dayOfMonth || 1)}일 · ${FINANCE_CATEGORIES[item.category] || FINANCE_CATEGORIES.other} · ${financeMemberLabel(item.paidBy)}</span></div><b>${formatWon(item.amount)}</b><button data-action="recurring-edit" data-recurring-id="${item.id}">수정</button></article>`).join("")}</div>` : `<p class="finance-empty-copy">월세, 통신비처럼 매달 반복되는 지출을 등록해 보세요.</p>`}
+      </section>
+      <section class="expense-history-panel">
+        <div class="section-heading"><div><p class="eyebrow">상세 내역</p><h2>${formatHistoryMonth(month)} 지출</h2></div><button class="btn ghost" data-action="expenses-export" ${monthExpenses.length ? "" : "disabled"}>CSV 내려받기</button></div>
+        ${monthExpenses.length ? [...grouped.entries()].map(([date, expenses]) => `<section class="expense-day"><h3>${formatHistoryDate(date).replace("오늘 · ", "")}</h3>${expenses.map(renderExpenseRow).join("")}</section>`).join("") : `<div class="finance-empty"><span>₩</span><strong>아직 지출 기록이 없어요</strong><p>영수증을 찍거나 직접 기록해 첫 내역을 남겨보세요.</p></div>`}
+      </section>
+    </div>`;
+}
+
+function renderExpenseRow(expense) {
+  const itemCount = Array.isArray(expense.items) ? expense.items.length : 0;
+  return `<article class="expense-row">
+    <button class="expense-main" data-action="expense-edit" data-expense-id="${expense.id}">
+      <span class="expense-category">${FINANCE_CATEGORIES[expense.category] || FINANCE_CATEGORIES.other}</span>
+      <span class="expense-copy"><strong>${escapeHtml(expense.merchant || "지출")}</strong><small>${financeMemberLabel(expense.paidBy)} · ${expense.scope === "personal" ? "개인 지출" : "생활비"}${itemCount ? ` · 품목 ${itemCount}개` : ""}${expense.source === "receipt" ? " · 영수증" : expense.source === "recurring" ? " · 고정비" : ""}</small>${expense.memo ? `<em>${escapeHtml(expense.memo)}</em>` : ""}</span>
+      <b>${formatWon(expense.amount)}</b>
+    </button>
+    <button class="expense-delete" data-action="expense-delete" data-expense-id="${expense.id}" aria-label="${escapeHtml(expense.merchant || "지출")} 삭제">×</button>
   </article>`;
 }
 
@@ -1935,6 +2056,10 @@ function renderModal() {
   if (ui.modal === "postpone") root.innerHTML = renderPostponeModal();
   if (ui.modal === "task") root.innerHTML = renderTaskModal();
   if (ui.modal === "shopping") root.innerHTML = renderShoppingEditModal();
+  if (ui.modal === "expense") root.innerHTML = renderExpenseModal();
+  if (ui.modal === "recurring") root.innerHTML = renderRecurringExpenseModal();
+  if (ui.modal === "budget") root.innerHTML = renderBudgetModal();
+  if (ui.modal === "receipt-loading") root.innerHTML = renderReceiptLoadingModal();
   if (ui.modal === "alerts") root.innerHTML = renderAlertsModal();
 }
 
@@ -1992,6 +2117,65 @@ function renderShoppingEditModal() {
   return modalShell("장보기 품목 수정", "수량이나 분류가 달라져도 바로 고칠 수 있어요.", content);
 }
 
+function financeOptions(options, selected) {
+  return Object.entries(options).map(([key, label]) => `<option value="${key}" ${key === selected ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function renderExpenseModal() {
+  const existing = ui.modalData?.expenseId ? state.expenses.find((item) => item.id === ui.modalData.expenseId) : null;
+  const draft = existing || ui.modalData?.draft || {};
+  const itemsText = (draft.items || []).map((item) => `${item.name} | ${Number(item.quantity || 1)} | ${Number(item.amount || 0)}`).join("\n");
+  const confidence = Number(draft.receiptMeta?.confidence ?? draft.confidence ?? 0);
+  const warnings = draft.receiptMeta?.warnings || draft.warnings || [];
+  const content = `<form id="expense-form" class="modal-form expense-form">
+    <input type="hidden" name="expenseId" value="${existing?.id || ""}">
+    <input type="hidden" name="source" value="${escapeHtml(draft.source || (ui.modalData?.fromReceipt ? "receipt" : "manual"))}">
+    ${ui.modalData?.fromReceipt ? `<div class="analysis-result ${confidence < .7 ? "low" : ""}"><strong>${confidence >= .8 ? "영수증을 읽었어요" : "확인이 필요한 영수증이에요"}</strong><span>AI가 만든 초안입니다. 금액과 날짜를 확인한 뒤 저장해 주세요.</span>${warnings.length ? `<ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}
+    <div class="finance-form-grid">
+      <label class="field-label">날짜<input class="form-control" type="date" name="date" required value="${escapeHtml(draft.date || operationalDate())}"></label>
+      <label class="field-label">사용처<input class="form-control" name="merchant" maxlength="80" required value="${escapeHtml(draft.merchant || "")}" placeholder="예: 마트, 병원"></label>
+      <label class="field-label full">금액 · 원<input class="form-control expense-amount-input" type="number" inputmode="numeric" name="amount" min="0" max="999999999" required value="${Number(draft.amount || 0) || ""}" placeholder="0"></label>
+      <label class="field-label">분류<select class="form-control" name="category">${financeOptions(FINANCE_CATEGORIES, draft.category || "food")}</select></label>
+      <label class="field-label">결제 수단<select class="form-control" name="paymentMethod">${financeOptions(PAYMENT_METHODS, draft.paymentMethod || "unknown")}</select></label>
+      <label class="field-label">누가 결제했나요?<select class="form-control" name="paidBy"><option value="wife" ${(draft.paidBy || state.currentMember) === "wife" ? "selected" : ""}>${escapeHtml(nameFor("wife"))}</option><option value="husband" ${(draft.paidBy || state.currentMember) === "husband" ? "selected" : ""}>${escapeHtml(nameFor("husband"))}</option><option value="shared" ${draft.paidBy === "shared" ? "selected" : ""}>공동</option></select></label>
+      <label class="field-label">지출 구분<select class="form-control" name="scope"><option value="household" ${draft.scope !== "personal" ? "selected" : ""}>생활비</option><option value="personal" ${draft.scope === "personal" ? "selected" : ""}>개인 지출</option></select></label>
+    </div>
+    <label class="field-label">메모 · 선택<input class="form-control" name="memo" maxlength="140" value="${escapeHtml(draft.memo || "")}" placeholder="기억할 내용"></label>
+    <details class="expense-items-details" ${itemsText ? "open" : ""}><summary>품목 ${itemsText ? `${(draft.items || []).length}개` : "직접 적기"}</summary><p>한 줄에 ‘품목 | 수량 | 금액’ 형식으로 적어요.</p><textarea class="form-control" name="items" rows="5" placeholder="우유 | 1 | 2800">${escapeHtml(itemsText)}</textarea></details>
+    <div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">${existing ? "수정 저장" : "가계부에 저장"}</button></div>
+  </form>`;
+  return modalShell(existing ? "지출 내역 수정" : "지출 기록", ui.modalData?.fromReceipt ? "영수증 원본은 저장하지 않았어요." : "두 사람이 함께 확인할 수 있게 기록해요.", content);
+}
+
+function renderRecurringExpenseModal() {
+  const existing = ui.modalData?.recurringId ? state.recurringExpenses.find((item) => item.id === ui.modalData.recurringId) : null;
+  const item = existing || {};
+  const content = `<form id="recurring-expense-form" class="modal-form">
+    <input type="hidden" name="recurringId" value="${existing?.id || ""}">
+    <label class="field-label">고정비 이름<input class="form-control" name="title" maxlength="80" required value="${escapeHtml(item.title || "")}" placeholder="예: 휴대폰 요금"></label>
+    <div class="finance-form-grid">
+      <label class="field-label">금액 · 원<input class="form-control" type="number" inputmode="numeric" name="amount" min="0" max="999999999" required value="${Number(item.amount || 0) || ""}"></label>
+      <label class="field-label">매월 결제일<input class="form-control" type="number" name="dayOfMonth" min="1" max="31" required value="${Number(item.dayOfMonth || 1)}"></label>
+      <label class="field-label">분류<select class="form-control" name="category">${financeOptions(FINANCE_CATEGORIES, item.category || "housing")}</select></label>
+      <label class="field-label">결제 수단<select class="form-control" name="paymentMethod">${financeOptions(PAYMENT_METHODS, item.paymentMethod || "card")}</select></label>
+      <label class="field-label">누가 결제하나요?<select class="form-control" name="paidBy"><option value="wife" ${(item.paidBy || state.currentMember) === "wife" ? "selected" : ""}>${escapeHtml(nameFor("wife"))}</option><option value="husband" ${(item.paidBy || state.currentMember) === "husband" ? "selected" : ""}>${escapeHtml(nameFor("husband"))}</option><option value="shared" ${item.paidBy === "shared" ? "selected" : ""}>공동</option></select></label>
+      <label class="field-label">지출 구분<select class="form-control" name="scope"><option value="household" ${item.scope !== "personal" ? "selected" : ""}>생활비</option><option value="personal" ${item.scope === "personal" ? "selected" : ""}>개인 지출</option></select></label>
+    </div>
+    <label class="toggle recurring-active"><input type="checkbox" name="active" ${item.active !== false ? "checked" : ""}><span></span><b>매달 자동 기록</b></label>
+    <div class="modal-actions">${existing ? `<button type="button" class="btn danger" data-action="recurring-delete" data-recurring-id="${existing.id}">삭제</button>` : ""}<button type="button" class="btn" data-action="modal-close">취소</button><button type="submit" class="btn primary">저장</button></div>
+  </form>`;
+  return modalShell(existing ? "고정비 수정" : "고정비 추가", "결제일이 되면 해당 월 가계부에 자동으로 기록해요.", content);
+}
+
+function renderBudgetModal() {
+  const content = `<form id="budget-form" class="modal-form"><label class="field-label">한 달 생활비 예산 · 원<input class="form-control expense-amount-input" type="number" inputmode="numeric" name="monthlyBudget" min="0" max="999999999" value="${Number(state.financeSettings?.monthlyBudget || 0) || ""}" placeholder="예: 1000000"></label><p class="form-help">개인 지출은 예산 사용액에서 제외해요. 0원으로 저장하면 예산 표시를 끕니다.</p><div class="modal-actions"><button type="button" class="btn" data-action="modal-close">취소</button><button class="btn primary" type="submit">예산 저장</button></div></form>`;
+  return modalShell("월 생활비 예산", "이번 달과 다음 달에 같은 기준을 사용해요.", content);
+}
+
+function renderReceiptLoadingModal() {
+  return modalShell("영수증을 읽는 중", "보통 몇 초 안에 초안이 만들어져요.", `<div class="receipt-loading"><span class="receipt-spinner"></span><strong>가맹점과 금액을 확인하고 있어요</strong><p>사진은 분석이 끝나면 바로 메모리에서 지워집니다.</p></div>`);
+}
+
 function renderTaskModal() {
   const task = ui.modalData?.taskId ? getTask(ui.modalData.taskId) : null;
   const recurrenceOptions = ["daily", "window", "weekly", "biweekly", "monthly", "interval", "weekdays"];
@@ -2032,6 +2216,14 @@ document.addEventListener("click", (event) => {
     ui.page = pageButton.dataset.page;
     if (pageButton.dataset.settingsOpen) ui.settingsSection = pageButton.dataset.settingsOpen;
     if (ui.page === "settings" && USE_REMOTE_SERVER && !backupSnapshots.loaded && !backupSnapshots.loading) loadBackupSnapshots();
+    if (ui.page === "finance") {
+      loadFinanceConfig();
+      if (ensureRecurringExpenses()) {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        saveState();
+        return;
+      }
+    }
     window.scrollTo({ top: 0, behavior: "smooth" });
     render();
     if (pageButton.dataset.settingsOpen) requestAnimationFrame(() => document.getElementById(`${pageButton.dataset.settingsOpen}-settings`)?.scrollIntoView({ behavior: "smooth", block: "start" }));
@@ -2108,6 +2300,18 @@ document.addEventListener("click", (event) => {
   if (action === "shopping-edit") return openShoppingEdit(actionButton.dataset.shoppingId);
   if (action === "shopping-trip") { ui.shoppingTrip = !ui.shoppingTrip; render(); return; }
   if (action === "shopping-clear-bought") return clearBoughtShoppingItems();
+  if (action === "shopping-to-expense") return openShoppingExpense();
+  if (action === "receipt-select") return document.getElementById("receipt-image-input")?.click();
+  if (action === "expense-add") return openExpenseModal();
+  if (action === "expense-edit") return openExpenseModal(actionButton.dataset.expenseId);
+  if (action === "expense-delete") return deleteExpense(actionButton.dataset.expenseId);
+  if (action === "finance-prev-month") { ui.financeMonth = shiftMonthKey(ui.financeMonth, -1); render(); return; }
+  if (action === "finance-next-month" && ui.financeMonth < operationalDate().slice(0, 7)) { ui.financeMonth = shiftMonthKey(ui.financeMonth, 1); render(); return; }
+  if (action === "budget-edit") { ui.modal = "budget"; ui.modalData = null; renderModal(); return; }
+  if (action === "recurring-add") { ui.modal = "recurring"; ui.modalData = null; renderModal(); return; }
+  if (action === "recurring-edit") { ui.modal = "recurring"; ui.modalData = { recurringId: actionButton.dataset.recurringId }; renderModal(); return; }
+  if (action === "recurring-delete") return deleteRecurringExpense(actionButton.dataset.recurringId);
+  if (action === "expenses-export") return exportExpensesCsv();
   if (action === "push-enable") return enablePushNotifications();
   if (action === "push-disable") return disablePushNotifications();
   if (action === "push-test") return testPushNotification();
@@ -2136,6 +2340,12 @@ document.addEventListener("change", (event) => {
     const file = target.files?.[0];
     if (file) importBackup(file);
     target.value = "";
+    return;
+  }
+  if (target.id === "receipt-image-input") {
+    const file = target.files?.[0];
+    target.value = "";
+    if (file) analyzeReceiptFile(file);
     return;
   }
   if (target.matches("[data-subtask]")) {
@@ -2224,6 +2434,9 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "shopping-edit-form") {
     saveShoppingEdit(new FormData(event.target));
   }
+  if (event.target.id === "expense-form") saveExpenseFromForm(new FormData(event.target));
+  if (event.target.id === "recurring-expense-form") saveRecurringExpenseFromForm(new FormData(event.target));
+  if (event.target.id === "budget-form") saveBudgetFromForm(new FormData(event.target));
 });
 
 document.addEventListener("keydown", (event) => {
@@ -2350,6 +2563,242 @@ function clearBoughtShoppingItems() {
   saveState(`구매한 품목 ${bought}개를 정리했어요.`, {
     onUndo: () => { state.shoppingItems.push(...removed); state.shoppingHistory = previousHistory; saveState("정리를 되돌렸어요."); },
   });
+}
+
+async function loadFinanceConfig() {
+  if (!USE_REMOTE_SERVER || financeInfo.aiEnabled !== null) return;
+  try {
+    const response = await fetch("/api/finance/config");
+    if (response.ok) {
+      const result = await response.json();
+      const changed = financeInfo.aiEnabled !== Boolean(result.aiEnabled);
+      financeInfo.aiEnabled = Boolean(result.aiEnabled);
+      if (changed && ui.page === "finance") render();
+    }
+  } catch {
+    financeInfo.aiEnabled = false;
+  }
+}
+
+function openExpenseModal(expenseId = "", draft = null, options = {}) {
+  ui.modal = "expense";
+  ui.modalData = { expenseId, draft, fromReceipt: Boolean(options.fromReceipt) };
+  renderModal();
+  requestAnimationFrame(() => document.querySelector("#expense-form input[name='merchant']")?.focus());
+}
+
+function parseExpenseItems(text, fallbackCategory) {
+  return String(text || "").split(/\r?\n/).map((line) => {
+    const [name, quantity, amount] = line.split("|").map((value) => String(value || "").trim());
+    return {
+      name: name.slice(0, 80),
+      quantity: Math.max(0, Number(quantity || 1) || 1),
+      amount: Math.max(0, Math.round(Number(String(amount || "").replace(/[^0-9.-]/g, "")) || 0)),
+      category: fallbackCategory,
+    };
+  }).filter((item) => item.name).slice(0, 100);
+}
+
+function saveExpenseFromForm(form) {
+  const expenseId = String(form.get("expenseId") || "");
+  const existing = expenseId ? state.expenses.find((item) => item.id === expenseId) : null;
+  const draft = ui.modalData?.draft || {};
+  const merchant = String(form.get("merchant") || "").trim();
+  const amount = Math.max(0, Math.round(Number(form.get("amount") || 0)));
+  if (!merchant || !amount) return toast("사용처와 금액을 확인해 주세요.");
+  const now = Date.now();
+  const category = FINANCE_CATEGORIES[form.get("category")] ? String(form.get("category")) : "other";
+  const source = ["manual", "receipt", "shopping", "recurring"].includes(form.get("source")) ? String(form.get("source")) : "manual";
+  const value = {
+    ...(existing || {}),
+    id: existing?.id || `expense-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    date: String(form.get("date") || operationalDate()),
+    merchant: merchant.slice(0, 80),
+    amount,
+    category,
+    paidBy: ["wife", "husband", "shared"].includes(form.get("paidBy")) ? String(form.get("paidBy")) : state.currentMember,
+    scope: form.get("scope") === "personal" ? "personal" : "household",
+    paymentMethod: PAYMENT_METHODS[form.get("paymentMethod")] ? String(form.get("paymentMethod")) : "unknown",
+    memo: String(form.get("memo") || "").trim().slice(0, 140),
+    items: parseExpenseItems(form.get("items"), category),
+    source,
+    shoppingItemIds: draft.shoppingItemIds || existing?.shoppingItemIds || [],
+    receiptMeta: source === "receipt" ? {
+      confidence: Number(draft.confidence ?? existing?.receiptMeta?.confidence ?? 0),
+      warnings: (draft.warnings || existing?.receiptMeta?.warnings || []).slice(0, 5),
+    } : existing?.receiptMeta,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    createdBy: existing?.createdBy || state.currentMember,
+    updatedAt: now,
+  };
+  if (existing) Object.assign(existing, value);
+  else state.expenses.push(value);
+  closeModal(false);
+  ui.financeMonth = value.date.slice(0, 7);
+  saveState(existing ? "지출 내역을 수정했어요." : "가계부에 기록했어요.");
+}
+
+function deleteExpense(expenseId) {
+  const item = state.expenses.find((expense) => expense.id === expenseId);
+  if (!item) return;
+  const index = state.expenses.indexOf(item);
+  state.expenses = state.expenses.filter((expense) => expense.id !== expenseId);
+  saveState(`${item.merchant || "지출"} 기록을 지웠어요.`, {
+    onUndo: () => { state.expenses.splice(Math.min(index, state.expenses.length), 0, item); saveState("삭제를 되돌렸어요."); },
+  });
+}
+
+function openShoppingExpense() {
+  const bought = state.shoppingItems.filter((item) => item.checked);
+  if (!bought.length) return toast("구매 완료한 품목이 없어요.");
+  const categories = bought.map((item) => item.category);
+  const category = categories.every((value) => value === "baby") ? "baby" : categories.every((value) => value === "living") ? "living" : "food";
+  openExpenseModal("", {
+    date: operationalDate(), merchant: "장보기", amount: 0, category, paidBy: state.currentMember,
+    scope: "household", paymentMethod: "card", source: "shopping",
+    memo: bought.map((item) => item.name).join(", ").slice(0, 140),
+    items: bought.map((item) => ({ name: item.name, quantity: 1, amount: 0, category })),
+    shoppingItemIds: bought.map((item) => item.id),
+  });
+}
+
+function saveRecurringExpenseFromForm(form) {
+  const id = String(form.get("recurringId") || "");
+  const existing = id ? state.recurringExpenses.find((item) => item.id === id) : null;
+  const title = String(form.get("title") || "").trim();
+  const amount = Math.max(0, Math.round(Number(form.get("amount") || 0)));
+  if (!title || !amount) return toast("고정비 이름과 금액을 확인해 주세요.");
+  const now = Date.now();
+  const value = {
+    ...(existing || {}), id: existing?.id || `recurring-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    title: title.slice(0, 80), amount,
+    dayOfMonth: Math.max(1, Math.min(31, Number(form.get("dayOfMonth") || 1))),
+    category: FINANCE_CATEGORIES[form.get("category")] ? String(form.get("category")) : "other",
+    paidBy: ["wife", "husband", "shared"].includes(form.get("paidBy")) ? String(form.get("paidBy")) : state.currentMember,
+    scope: form.get("scope") === "personal" ? "personal" : "household",
+    paymentMethod: PAYMENT_METHODS[form.get("paymentMethod")] ? String(form.get("paymentMethod")) : "unknown",
+    active: form.get("active") === "on", createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: now,
+  };
+  if (existing) Object.assign(existing, value); else state.recurringExpenses.push(value);
+  closeModal(false);
+  ensureRecurringExpenses();
+  saveState(existing ? "고정비를 수정했어요." : "고정비를 추가했어요.");
+}
+
+function deleteRecurringExpense(recurringId) {
+  const item = state.recurringExpenses.find((entry) => entry.id === recurringId);
+  if (!item) return;
+  state.recurringExpenses = state.recurringExpenses.filter((entry) => entry.id !== recurringId);
+  closeModal(false);
+  saveState("고정비를 삭제했어요. 이미 기록된 지난 지출은 그대로 남아요.");
+}
+
+function ensureRecurringExpenses() {
+  const today = operationalDate();
+  const month = today.slice(0, 7);
+  const todayDay = Number(today.slice(8, 10));
+  const lastDay = monthDays(month).dates.length;
+  let changed = false;
+  for (const item of state.recurringExpenses || []) {
+    const dueDay = Math.min(Number(item.dayOfMonth || 1), lastDay);
+    if (item.active === false || todayDay < dueDay) continue;
+    const id = `expense-${item.id}-${month}`;
+    if (state.expenses.some((expense) => expense.id === id) || state.expenseDeletedIds?.[id]) continue;
+    state.expenses.push({
+      id, recurringId: item.id, date: `${month}-${String(dueDay).padStart(2, "0")}`,
+      merchant: item.title, amount: item.amount, category: item.category, paidBy: item.paidBy,
+      scope: item.scope, paymentMethod: item.paymentMethod, memo: "매달 고정비 자동 기록",
+      items: [], source: "recurring", createdAt: new Date().toISOString(), createdBy: state.currentMember, updatedAt: Date.now(),
+    });
+    changed = true;
+  }
+  return changed;
+}
+
+function saveBudgetFromForm(form) {
+  state.financeSettings ||= {};
+  state.financeSettings.monthlyBudget = Math.max(0, Math.round(Number(form.get("monthlyBudget") || 0)));
+  closeModal(false);
+  saveState(state.financeSettings.monthlyBudget ? "월 예산을 저장했어요." : "월 예산 표시를 껐어요.");
+}
+
+function imageFileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type || "")) return reject(new Error("unsupported"));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read_failed"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("decode_failed"));
+      img.onload = () => {
+        const maxEdge = 2200;
+        const scale = Math.min(1, maxEdge / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#fff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(img, 0, 0, canvas.width, canvas.height);
+        let data = canvas.toDataURL("image/jpeg", .88);
+        if (data.length > 10_000_000) data = canvas.toDataURL("image/jpeg", .68);
+        resolve(data);
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function analyzeReceiptFile(file) {
+  ui.modal = "receipt-loading";
+  ui.modalData = null;
+  renderModal();
+  financeInfo.analyzing = true;
+  try {
+    const image = await imageFileToDataUrl(file);
+    const response = await fetch("/api/finance/receipt-analysis", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (result.error === "ai_not_configured") {
+        financeInfo.aiEnabled = false;
+        openExpenseModal();
+        toast("AI 영수증 분석 키가 아직 연결되지 않아 직접 입력을 열었어요.");
+        return;
+      }
+      throw new Error(result.error || "analysis_failed");
+    }
+    financeInfo.aiEnabled = true;
+    if (!result.draft?.isReceipt) {
+      openExpenseModal();
+      toast("영수증으로 확인하기 어려워 직접 입력을 열었어요.");
+      return;
+    }
+    openExpenseModal("", { ...result.draft, source: "receipt", paidBy: state.currentMember, scope: "household" }, { fromReceipt: true });
+  } catch (error) {
+    openExpenseModal();
+    const message = error.message === "unsupported" ? "JPG, PNG 또는 WebP 사진을 선택해 주세요." : error.message === "too_many_receipts" ? "영수증 분석을 잠시 많이 사용했어요. 조금 뒤 다시 해주세요." : "사진을 읽지 못했어요. 직접 입력으로 기록할 수 있어요.";
+    toast(message);
+  } finally {
+    financeInfo.analyzing = false;
+  }
+}
+
+function exportExpensesCsv() {
+  const rows = [["날짜", "사용처", "금액", "분류", "결제자", "구분", "결제수단", "메모"]];
+  const items = (state.expenses || []).filter((item) => String(item.date || "").slice(0, 7) === ui.financeMonth).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  for (const item of items) rows.push([item.date, item.merchant, item.amount, FINANCE_CATEGORIES[item.category] || "기타", item.paidBy === "shared" ? "공동" : nameFor(item.paidBy), item.scope === "personal" ? "개인" : "생활비", PAYMENT_METHODS[item.paymentMethod] || "미확인", item.memo || ""]);
+  const quote = (value) => {
+    let safe = String(value ?? "");
+    if (/^[=+\-@]/.test(safe)) safe = `'${safe}`;
+    return `"${safe.replaceAll('"', '""')}"`;
+  };
+  const blob = new Blob(["\ufeff", rows.map((row) => row.map(quote).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a"); link.href = url; link.download = `doran-expenses-${ui.financeMonth}.csv`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function toggleNightDay(day) {
@@ -2742,7 +3191,7 @@ function toast(message, options = {}) {
 }
 
 const requestedPage = new URLSearchParams(window.location.search).get("page");
-if (["today", "all", "shopping", "history", "settings"].includes(requestedPage)) ui.page = requestedPage;
+if (["today", "all", "shopping", "finance", "history", "settings"].includes(requestedPage)) ui.page = requestedPage;
 
 window.addEventListener("online", async () => {
   connectionAvailable = true;

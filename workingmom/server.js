@@ -23,8 +23,13 @@ const SESSION_COOKIE = "workingmom_session";
 const SESSION_AGE_SECONDS = 90 * 24 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LIMIT = 8;
+const RECEIPT_WINDOW_MS = 15 * 60 * 1000;
+const RECEIPT_LIMIT = 12;
+const OPENAI_RECEIPT_MODEL = process.env.OPENAI_RECEIPT_MODEL || "gpt-5.6-luna";
+const OPENAI_SAFETY_IDENTIFIER = crypto.createHash("sha256").update(`workingmom:${APP_USERNAME}`).digest("hex").slice(0, 32);
 const clients = new Set();
 const loginAttempts = new Map();
+const receiptAttempts = new Map();
 const PUBLIC_FILES = new Set([
   "/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest",
   "/sw.js",
@@ -45,7 +50,7 @@ const MIME = {
 function readState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    if (Number(parsed.version || 1) < 8) {
+    if (Number(parsed.version || 1) < 9) {
       const migratedAt = Number(parsed.updatedAt || 0) + 1;
       parsed.household ||= {};
       parsed.household.workSchedule ||= {};
@@ -55,7 +60,13 @@ function readState() {
       parsed.syncMeta ||= { fields: {}, objects: {} };
       parsed.syncMeta.fields ||= {};
       parsed.syncMeta.fields.household = Math.max(migratedAt, Number(parsed.syncMeta.fields.household || 0));
-      parsed.version = 8;
+      parsed.expenses ||= [];
+      parsed.expenseDeletedIds ||= {};
+      parsed.recurringExpenses ||= [];
+      parsed.recurringExpenseDeletedIds ||= {};
+      parsed.financeSettings ||= { monthlyBudget: 0 };
+      parsed.syncMeta.fields.financeSettings = Math.max(migratedAt, Number(parsed.syncMeta.fields.financeSettings || 0));
+      parsed.version = 9;
       parsed.updatedAt = migratedAt;
     }
     return parsed;
@@ -154,8 +165,10 @@ function mergeStates(current, incoming) {
   if (!current) return incoming;
   const result = { ...current, ...incoming };
 
-  for (const field of ["household", "customTasks", "shoppingHistory"]) {
-    result[field] = fieldTimestamp(incoming, field) >= fieldTimestamp(current, field) ? incoming[field] : current[field];
+  for (const field of ["household", "customTasks", "shoppingHistory", "financeSettings"]) {
+    if (incoming[field] === undefined) result[field] = current[field];
+    else if (current[field] === undefined) result[field] = incoming[field];
+    else result[field] = fieldTimestamp(incoming, field) >= fieldTimestamp(current, field) ? incoming[field] : current[field];
   }
 
   for (const field of ["claims", "postponed", "subtaskProgress", "taskOverrides"]) {
@@ -174,6 +187,16 @@ function mergeStates(current, incoming) {
     if (!existing || Number(item.updatedAt || 0) >= Number(existing.updatedAt || 0)) shoppingMap.set(item.id, item);
   }
   result.shoppingItems = [...shoppingMap.values()].filter((item) => Number(item.updatedAt || 0) > Number(result.shoppingDeletedIds[item.id] || 0));
+
+  for (const [itemsField, deletedField] of [["expenses", "expenseDeletedIds"], ["recurringExpenses", "recurringExpenseDeletedIds"]]) {
+    result[deletedField] = mergeTimestampMaps(current[deletedField], incoming[deletedField]);
+    const itemMap = new Map();
+    for (const item of [...(current[itemsField] || []), ...(incoming[itemsField] || [])]) {
+      const existing = itemMap.get(item.id);
+      if (!existing || Number(item.updatedAt || 0) >= Number(existing.updatedAt || 0)) itemMap.set(item.id, item);
+    }
+    result[itemsField] = [...itemMap.values()].filter((item) => Number(item.updatedAt || 0) > Number(result[deletedField][item.id] || 0));
+  }
 
   const fields = mergeTimestampMaps(current.syncMeta?.fields, incoming.syncMeta?.fields);
   const objects = {};
@@ -197,7 +220,7 @@ function mergeStates(current, incoming) {
   result.shoppingHistory = [...historyMap.values()]
     .sort((left, right) => new Date(right.lastBoughtAt || 0) - new Date(left.lastBoughtAt || 0))
     .slice(0, 40);
-  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 8);
+  result.version = Math.max(Number(current.version || 1), Number(incoming.version || 1), 9);
   result.clientId = incoming.clientId;
   result.updatedAt = Math.max(Date.now(), Number(current.updatedAt || 0) + 1, Number(incoming.updatedAt || 0));
   return result;
@@ -508,12 +531,12 @@ function noteFailedLogin(request) {
   loginAttempts.set(key, [...(loginAttempts.get(key) || []), Date.now()]);
 }
 
-function readJsonBody(request, callback) {
+function readJsonBody(request, callback, maxBytes = 2_000_000) {
   let body = "";
   let tooLarge = false;
   request.on("data", (chunk) => {
     body += chunk;
-    if (body.length > 2_000_000) tooLarge = true;
+    if (body.length > maxBytes) tooLarge = true;
   });
   request.on("end", () => {
     if (tooLarge) return callback(new Error("too_large"));
@@ -523,6 +546,127 @@ function readJsonBody(request, callback) {
       callback(new Error("invalid_json"));
     }
   });
+}
+
+function canAnalyzeReceipt(request) {
+  const key = clientAddress(request);
+  const now = Date.now();
+  const recent = (receiptAttempts.get(key) || []).filter((time) => now - time < RECEIPT_WINDOW_MS);
+  if (recent.length >= RECEIPT_LIMIT) {
+    receiptAttempts.set(key, recent);
+    return false;
+  }
+  receiptAttempts.set(key, [...recent, now]);
+  return true;
+}
+
+const RECEIPT_CATEGORIES = ["food", "baby", "living", "transport", "housing", "medical", "leisure", "education", "other"];
+
+const RECEIPT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    is_receipt: { type: "boolean" },
+    merchant: { type: "string" },
+    date: { type: "string" },
+    total: { type: "integer" },
+    payment_method: { type: "string", enum: ["card", "cash", "transfer", "other", "unknown"] },
+    category: { type: "string", enum: RECEIPT_CATEGORIES },
+    confidence: { type: "number" },
+    warnings: { type: "array", items: { type: "string" } },
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" },
+          quantity: { type: "number" },
+          amount: { type: "integer" },
+          category: { type: "string", enum: RECEIPT_CATEGORIES },
+        },
+        required: ["name", "quantity", "amount", "category"],
+      },
+    },
+  },
+  required: ["is_receipt", "merchant", "date", "total", "payment_method", "category", "confidence", "warnings", "items"],
+};
+
+function outputTextFromResponse(result) {
+  for (const output of result?.output || []) {
+    for (const content of output?.content || []) {
+      if (content?.type === "output_text" && typeof content.text === "string") return content.text;
+    }
+  }
+  return "";
+}
+
+function cleanReceiptDraft(value) {
+  const today = seoulDateKey();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(value?.date || "") ? value.date : today;
+  return {
+    isReceipt: Boolean(value?.is_receipt),
+    merchant: String(value?.merchant || "").trim().slice(0, 80),
+    date,
+    amount: Math.max(0, Math.round(Number(value?.total || 0))),
+    paymentMethod: ["card", "cash", "transfer", "other", "unknown"].includes(value?.payment_method) ? value.payment_method : "unknown",
+    category: RECEIPT_CATEGORIES.includes(value?.category) ? value.category : "other",
+    confidence: Math.max(0, Math.min(1, Number(value?.confidence || 0))),
+    warnings: (Array.isArray(value?.warnings) ? value.warnings : []).map((item) => String(item).slice(0, 120)).slice(0, 5),
+    items: (Array.isArray(value?.items) ? value.items : []).map((item) => ({
+      name: String(item?.name || "").trim().slice(0, 80),
+      quantity: Math.max(0, Number(item?.quantity || 0)),
+      amount: Math.max(0, Math.round(Number(item?.amount || 0))),
+      category: RECEIPT_CATEGORIES.includes(item?.category) ? item.category : "other",
+    })).filter((item) => item.name).slice(0, 100),
+  };
+}
+
+async function handleReceiptAnalysis(request, response) {
+  if (!process.env.OPENAI_API_KEY) return sendJson(response, 503, { ok: false, error: "ai_not_configured" });
+  if (!canAnalyzeReceipt(request)) return sendJson(response, 429, { ok: false, error: "too_many_receipts" });
+  readJsonBody(request, async (error, body) => {
+    if (error) return sendJson(response, error.message === "too_large" ? 413 : 400, { ok: false, error: error.message });
+    const image = typeof body?.image === "string" ? body.image : "";
+    if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(image)) {
+      return sendJson(response, 400, { ok: false, error: "invalid_image" });
+    }
+    try {
+      const apiResponse = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: OPENAI_RECEIPT_MODEL,
+          store: false,
+          safety_identifier: OPENAI_SAFETY_IDENTIFIER,
+          reasoning: { effort: "none" },
+          instructions: "한국어 영수증을 정확히 읽는 가계부 도우미입니다. 사진에 보이는 값만 사용하세요. 가맹점, 거래일, 최종 결제금액, 결제수단, 품목과 금액을 추출하세요. 할인 전 금액이 아니라 실제 최종 결제금액을 total로 사용하세요. 날짜는 YYYY-MM-DD, 금액은 원 단위 정수입니다. 글자가 가려졌거나 확실하지 않으면 추측하지 말고 빈 문자열이나 0을 쓰고 warnings에 한국어로 이유를 적으세요. 영수증이 아니면 is_receipt를 false로 하세요. category는 허용된 값 중 하나만 고르세요.",
+          input: [{
+            role: "user",
+            content: [
+              { type: "input_text", text: `이 영수증을 분석해 가계부 초안을 만드세요. 오늘은 ${seoulDateKey()}입니다. 사용자가 저장 전에 반드시 확인합니다.` },
+              { type: "input_image", image_url: image, detail: "high" },
+            ],
+          }],
+          text: { format: { type: "json_schema", name: "receipt_draft", strict: true, schema: RECEIPT_SCHEMA } },
+          max_output_tokens: 3000,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const result = await apiResponse.json();
+      if (!apiResponse.ok) {
+        console.warn("Receipt analysis API error", apiResponse.status, result?.error?.code || result?.error?.type || "unknown");
+        return sendJson(response, 502, { ok: false, error: "analysis_failed" });
+      }
+      const outputText = outputTextFromResponse(result);
+      if (!outputText) return sendJson(response, 502, { ok: false, error: "empty_analysis" });
+      const draft = cleanReceiptDraft(JSON.parse(outputText));
+      sendJson(response, 200, { ok: true, draft });
+    } catch (analysisError) {
+      console.warn("Receipt analysis failed", analysisError?.name || "Error");
+      sendJson(response, 502, { ok: false, error: analysisError?.name === "TimeoutError" ? "analysis_timeout" : "analysis_failed" });
+    }
+  }, 12_000_000);
 }
 
 function handleLogin(request, response) {
@@ -557,7 +701,7 @@ function handleStatePost(request, response) {
 function handleStateReplace(request, response) {
   readJsonBody(request, (error, incoming) => {
     if (error || !incoming || !Array.isArray(incoming.events)) return sendJson(response, 400, { ok: false, error: "invalid_state" });
-    const replaced = { ...incoming, version: 8, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
+    const replaced = { ...incoming, version: 9, updatedAt: Math.max(Date.now(), Number(incoming.updatedAt || 0)) };
     ensureDailyBackup(readState());
     writeJsonAtomic(DATA_FILE, replaced);
     broadcast(replaced);
@@ -618,6 +762,11 @@ const server = http.createServer((request, response) => {
   }
   if (pathname === "/api/state" && request.method === "POST") return handleStatePost(request, response);
   if (pathname === "/api/state/replace" && request.method === "POST") return handleStateReplace(request, response);
+  if (pathname === "/api/finance/config" && request.method === "GET") {
+    sendJson(response, 200, { aiEnabled: Boolean(process.env.OPENAI_API_KEY) });
+    return;
+  }
+  if (pathname === "/api/finance/receipt-analysis" && request.method === "POST") return handleReceiptAnalysis(request, response);
   if (pathname === "/api/backups" && request.method === "GET") {
     sendJson(response, 200, { backups: listBackupSnapshots() });
     return;
