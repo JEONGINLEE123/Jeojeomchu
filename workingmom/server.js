@@ -4,6 +4,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const webpush = require("web-push");
+const { createWorker } = require("tesseract.js");
 
 const ROOT = __dirname;
 const DATA_DIR = process.env.DORAN_DATA_DIR
@@ -25,11 +26,11 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LIMIT = 8;
 const RECEIPT_WINDOW_MS = 15 * 60 * 1000;
 const RECEIPT_LIMIT = 12;
-const OPENAI_RECEIPT_MODEL = process.env.OPENAI_RECEIPT_MODEL || "gpt-5.6-luna";
-const OPENAI_SAFETY_IDENTIFIER = crypto.createHash("sha256").update(`workingmom:${APP_USERNAME}`).digest("hex").slice(0, 32);
 const clients = new Set();
 const loginAttempts = new Map();
 const receiptAttempts = new Map();
+let receiptOcrWorkerPromise = null;
+let receiptOcrQueue = Promise.resolve();
 const PUBLIC_FILES = new Set([
   "/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest",
   "/sw.js",
@@ -562,68 +563,141 @@ function canAnalyzeReceipt(request) {
 
 const RECEIPT_CATEGORIES = ["food", "baby", "living", "transport", "housing", "medical", "leisure", "education", "other"];
 
-const RECEIPT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    is_receipt: { type: "boolean" },
-    merchant: { type: "string" },
-    date: { type: "string" },
-    total: { type: "integer" },
-    payment_method: { type: "string", enum: ["card", "cash", "transfer", "other", "unknown"] },
-    category: { type: "string", enum: RECEIPT_CATEGORIES },
-    confidence: { type: "number" },
-    warnings: { type: "array", items: { type: "string" } },
-    items: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          name: { type: "string" },
-          quantity: { type: "number" },
-          amount: { type: "integer" },
-          category: { type: "string", enum: RECEIPT_CATEGORIES },
-        },
-        required: ["name", "quantity", "amount", "category"],
-      },
-    },
-  },
-  required: ["is_receipt", "merchant", "date", "total", "payment_method", "category", "confidence", "warnings", "items"],
-};
+const RECEIPT_SKIP_LINE = /(사업자|대표자|전화|TEL|FAX|주소|승인번호|카드번호|회원번호|영수증|RECEIPT|부가세|공급가|과세|면세|소\s*계|거스름|잔액)/i;
+const RECEIPT_TOTAL_LINE = /(결제\s*금액|받을\s*금액|총\s*액|합\s*계|TOTAL|AMOUNT)/i;
 
-function outputTextFromResponse(result) {
-  for (const output of result?.output || []) {
-    for (const content of output?.content || []) {
-      if (content?.type === "output_text" && typeof content.text === "string") return content.text;
-    }
+async function getReceiptOcrWorker() {
+  if (!receiptOcrWorkerPromise) {
+    const cachePath = path.join(DATA_DIR, "ocr-cache");
+    fs.mkdirSync(cachePath, { recursive: true });
+    receiptOcrWorkerPromise = createWorker(["kor", "eng"], 1, {
+      cachePath,
+      logger: (event) => {
+        if (event.status === "recognizing text" && event.progress === 1) console.log("무료 영수증 글자 인식 완료");
+      },
+    }).catch((error) => {
+      receiptOcrWorkerPromise = null;
+      throw error;
+    });
   }
-  return "";
+  return receiptOcrWorkerPromise;
 }
 
-function cleanReceiptDraft(value) {
-  const today = seoulDateKey();
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(value?.date || "") ? value.date : today;
+function recognizeReceipt(imageBuffer) {
+  const job = receiptOcrQueue.then(async () => {
+    const worker = await getReceiptOcrWorker();
+    return worker.recognize(imageBuffer, { rotateAuto: true });
+  });
+  receiptOcrQueue = job.catch(() => {});
+  return job;
+}
+
+function cleanOcrLine(value) {
+  return String(value || "")
+    .replace(/[|[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function amountsInLine(line) {
+  const matches = String(line || "").match(/(?:\d{1,3}(?:[,.]\d{3})+|\d{2,8})(?:\s*원)?/g) || [];
+  return matches.map((value) => Number(value.replace(/[^\d]/g, "")))
+    .filter((value) => Number.isFinite(value) && value > 0 && value < 100_000_000);
+}
+
+function receiptDate(lines) {
+  for (const line of lines) {
+    const match = line.match(/\b(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})/);
+    if (!match) continue;
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${match[1]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+  return seoulDateKey();
+}
+
+function receiptCategory(text) {
+  const rules = [
+    ["baby", /(기저귀|분유|이유식|젖병|아기|유아|베이비|물티슈)/i],
+    ["medical", /(병원|의원|약국|약품|진료|의료)/i],
+    ["transport", /(주유|택시|버스|지하철|교통|주차|톨게이트)/i],
+    ["housing", /(전기|가스|수도|관리비|월세|통신|인터넷)/i],
+    ["education", /(학원|교육|교재|문구|서점)/i],
+    ["leisure", /(영화|공연|여행|호텔|카페|커피)/i],
+    ["living", /(세제|휴지|샴푸|비누|청소|생활용품|다이소)/i],
+    ["food", /(마트|슈퍼|식품|우유|계란|고기|채소|과일|빵|라면|식당|음식|배달|편의점)/i],
+  ];
+  return rules.find(([, pattern]) => pattern.test(text))?.[0] || "other";
+}
+
+function receiptPaymentMethod(text) {
+  if (/(신용|체크|카드|VISA|MASTER|승인)/i.test(text)) return "card";
+  if (/(현금|CASH|거스름)/i.test(text)) return "cash";
+  if (/(계좌|이체|송금)/i.test(text)) return "transfer";
+  return "unknown";
+}
+
+function parseReceiptOcr(data = {}) {
+  const text = String(data.text || "");
+  const lines = text.split(/\r?\n/).map(cleanOcrLine).filter((line) => line.length >= 2);
+  const date = receiptDate(lines);
+  const totalCandidates = [];
+  for (const line of lines) {
+    if (!RECEIPT_TOTAL_LINE.test(line)) continue;
+    const amounts = amountsInLine(line);
+    if (amounts.length) totalCandidates.push(amounts.at(-1));
+  }
+
+  const items = [];
+  for (const line of lines) {
+    if (RECEIPT_SKIP_LINE.test(line) || RECEIPT_TOTAL_LINE.test(line) || /\b20\d{2}\s*[-./년]/.test(line)) continue;
+    const amounts = amountsInLine(line);
+    if (!amounts.length) continue;
+    const amount = amounts.at(-1);
+    const amountMatch = line.match(/(?:\d{1,3}(?:[,.]\d{3})+|\d{2,8})(?:\s*원)?\s*$/);
+    if (!amountMatch) continue;
+    const name = cleanOcrLine(line.slice(0, amountMatch.index)).replace(/^\d+\s*[xX*]\s*/, "").slice(0, 80);
+    if (!name || /^[\d\s.,-]+$/.test(name)) continue;
+    items.push({ name, quantity: 1, amount, category: receiptCategory(name) });
+  }
+
+  let amount = totalCandidates.at(-1) || 0;
+  if (!amount) {
+    const fallbackAmounts = lines
+      .filter((line) => !RECEIPT_SKIP_LINE.test(line) && !/\b20\d{2}\s*[-./년]/.test(line))
+      .flatMap(amountsInLine);
+    amount = fallbackAmounts.length ? Math.max(...fallbackAmounts) : 0;
+  }
+
+  const merchant = lines.find((line, index) => {
+    if (index > 7 || RECEIPT_SKIP_LINE.test(line) || RECEIPT_TOTAL_LINE.test(line)) return false;
+    const letters = (line.match(/[가-힣A-Za-z]/g) || []).length;
+    return letters >= 2 && letters >= line.length * 0.3;
+  }) || "";
+  const confidence = Math.max(0, Math.min(1, Number(data.confidence || 0) / 100));
+  const warnings = [];
+  if (confidence < 0.65) warnings.push("사진의 글자 인식률이 낮아요. 금액과 날짜를 꼭 확인해 주세요.");
+  if (!merchant) warnings.push("사용처를 뚜렷하게 읽지 못했어요.");
+  if (!amount) warnings.push("최종 결제금액을 찾지 못했어요.");
+  if (!items.length) warnings.push("품목은 읽지 못했지만 총액은 직접 확인해 저장할 수 있어요.");
+  const receiptSignals = /(영수증|RECEIPT|합\s*계|TOTAL|결제|승인|카드|현금)/i.test(text);
+
   return {
-    isReceipt: Boolean(value?.is_receipt),
-    merchant: String(value?.merchant || "").trim().slice(0, 80),
+    isReceipt: Boolean(amount && (receiptSignals || items.length >= 1)),
+    merchant: merchant.slice(0, 80),
     date,
-    amount: Math.max(0, Math.round(Number(value?.total || 0))),
-    paymentMethod: ["card", "cash", "transfer", "other", "unknown"].includes(value?.payment_method) ? value.payment_method : "unknown",
-    category: RECEIPT_CATEGORIES.includes(value?.category) ? value.category : "other",
-    confidence: Math.max(0, Math.min(1, Number(value?.confidence || 0))),
-    warnings: (Array.isArray(value?.warnings) ? value.warnings : []).map((item) => String(item).slice(0, 120)).slice(0, 5),
-    items: (Array.isArray(value?.items) ? value.items : []).map((item) => ({
-      name: String(item?.name || "").trim().slice(0, 80),
-      quantity: Math.max(0, Number(item?.quantity || 0)),
-      amount: Math.max(0, Math.round(Number(item?.amount || 0))),
-      category: RECEIPT_CATEGORIES.includes(item?.category) ? item.category : "other",
-    })).filter((item) => item.name).slice(0, 100),
+    amount,
+    paymentMethod: receiptPaymentMethod(text),
+    category: receiptCategory(`${merchant} ${items.map((item) => item.name).join(" ")}`),
+    confidence,
+    warnings: warnings.slice(0, 5),
+    items: items.slice(0, 100),
   };
 }
 
 async function handleReceiptAnalysis(request, response) {
-  if (!process.env.OPENAI_API_KEY) return sendJson(response, 503, { ok: false, error: "ai_not_configured" });
   if (!canAnalyzeReceipt(request)) return sendJson(response, 429, { ok: false, error: "too_many_receipts" });
   readJsonBody(request, async (error, body) => {
     if (error) return sendJson(response, error.message === "too_large" ? 413 : 400, { ok: false, error: error.message });
@@ -632,39 +706,13 @@ async function handleReceiptAnalysis(request, response) {
       return sendJson(response, 400, { ok: false, error: "invalid_image" });
     }
     try {
-      const apiResponse = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: OPENAI_RECEIPT_MODEL,
-          store: false,
-          safety_identifier: OPENAI_SAFETY_IDENTIFIER,
-          reasoning: { effort: "none" },
-          instructions: "한국어 영수증을 정확히 읽는 가계부 도우미입니다. 사진에 보이는 값만 사용하세요. 가맹점, 거래일, 최종 결제금액, 결제수단, 품목과 금액을 추출하세요. 할인 전 금액이 아니라 실제 최종 결제금액을 total로 사용하세요. 날짜는 YYYY-MM-DD, 금액은 원 단위 정수입니다. 글자가 가려졌거나 확실하지 않으면 추측하지 말고 빈 문자열이나 0을 쓰고 warnings에 한국어로 이유를 적으세요. 영수증이 아니면 is_receipt를 false로 하세요. category는 허용된 값 중 하나만 고르세요.",
-          input: [{
-            role: "user",
-            content: [
-              { type: "input_text", text: `이 영수증을 분석해 가계부 초안을 만드세요. 오늘은 ${seoulDateKey()}입니다. 사용자가 저장 전에 반드시 확인합니다.` },
-              { type: "input_image", image_url: image, detail: "high" },
-            ],
-          }],
-          text: { format: { type: "json_schema", name: "receipt_draft", strict: true, schema: RECEIPT_SCHEMA } },
-          max_output_tokens: 3000,
-        }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      const result = await apiResponse.json();
-      if (!apiResponse.ok) {
-        console.warn("Receipt analysis API error", apiResponse.status, result?.error?.code || result?.error?.type || "unknown");
-        return sendJson(response, 502, { ok: false, error: "analysis_failed" });
-      }
-      const outputText = outputTextFromResponse(result);
-      if (!outputText) return sendJson(response, 502, { ok: false, error: "empty_analysis" });
-      const draft = cleanReceiptDraft(JSON.parse(outputText));
-      sendJson(response, 200, { ok: true, draft });
+      const imageBuffer = Buffer.from(image.slice(image.indexOf(",") + 1), "base64");
+      if (!imageBuffer.length || imageBuffer.length > 8_000_000) return sendJson(response, 413, { ok: false, error: "too_large" });
+      const result = await recognizeReceipt(imageBuffer);
+      sendJson(response, 200, { ok: true, engine: "local_ocr", draft: parseReceiptOcr(result.data) });
     } catch (analysisError) {
-      console.warn("Receipt analysis failed", analysisError?.name || "Error");
-      sendJson(response, 502, { ok: false, error: analysisError?.name === "TimeoutError" ? "analysis_timeout" : "analysis_failed" });
+      console.warn("Free receipt OCR failed", analysisError?.message || analysisError?.name || "Error");
+      sendJson(response, 502, { ok: false, error: "analysis_failed" });
     }
   }, 12_000_000);
 }
@@ -763,7 +811,7 @@ const server = http.createServer((request, response) => {
   if (pathname === "/api/state" && request.method === "POST") return handleStatePost(request, response);
   if (pathname === "/api/state/replace" && request.method === "POST") return handleStateReplace(request, response);
   if (pathname === "/api/finance/config" && request.method === "GET") {
-    sendJson(response, 200, { aiEnabled: Boolean(process.env.OPENAI_API_KEY) });
+    sendJson(response, 200, { aiEnabled: true, engine: "local_ocr", free: true });
     return;
   }
   if (pathname === "/api/finance/receipt-analysis" && request.method === "POST") return handleReceiptAnalysis(request, response);

@@ -1278,7 +1278,7 @@ function renderFinance() {
           <input id="receipt-image-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden>
         </div>
       </header>
-      <p class="receipt-privacy">영수증 사진은 AI 분석 중에만 사용하고 우리 앱과 백업에는 저장하지 않아요.${financeInfo.aiEnabled === false ? " 지금은 AI 키가 연결되지 않아 직접 입력으로 이어집니다." : ""}</p>
+      <p class="receipt-privacy">무료 글자 인식으로 처리해 별도 사용료가 없어요. 사진은 도란도란 서버 메모리에서만 읽고 앱과 백업에는 저장하지 않습니다.</p>
       <section class="finance-summary-card">
         <div class="finance-month-nav"><button data-action="finance-prev-month" aria-label="이전 달">‹</button><strong>${formatHistoryMonth(month)}</strong><button data-action="finance-next-month" aria-label="다음 달" ${month >= currentMonth ? "disabled" : ""}>›</button></div>
         <div class="finance-total"><span>생활비 지출</span><strong>${formatWon(total)}</strong><small>${previousTotal ? `지난달보다 ${difference === 0 ? "같아요" : `${formatWon(Math.abs(difference))} ${difference > 0 ? "더 썼어요" : "덜 썼어요"}`}` : "지난달 기록이 아직 없어요"}</small></div>
@@ -2130,7 +2130,7 @@ function renderExpenseModal() {
   const content = `<form id="expense-form" class="modal-form expense-form">
     <input type="hidden" name="expenseId" value="${existing?.id || ""}">
     <input type="hidden" name="source" value="${escapeHtml(draft.source || (ui.modalData?.fromReceipt ? "receipt" : "manual"))}">
-    ${ui.modalData?.fromReceipt ? `<div class="analysis-result ${confidence < .7 ? "low" : ""}"><strong>${confidence >= .8 ? "영수증을 읽었어요" : "확인이 필요한 영수증이에요"}</strong><span>AI가 만든 초안입니다. 금액과 날짜를 확인한 뒤 저장해 주세요.</span>${warnings.length ? `<ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}
+    ${ui.modalData?.fromReceipt ? `<div class="analysis-result ${confidence < .7 ? "low" : ""}"><strong>${confidence >= .8 ? "영수증을 읽었어요" : "확인이 필요한 영수증이에요"}</strong><span>무료 OCR이 만든 초안입니다. 금액과 날짜를 확인한 뒤 저장해 주세요.</span>${warnings.length ? `<ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}
     <div class="finance-form-grid">
       <label class="field-label">날짜<input class="form-control" type="date" name="date" required value="${escapeHtml(draft.date || operationalDate())}"></label>
       <label class="field-label">사용처<input class="form-control" name="merchant" maxlength="80" required value="${escapeHtml(draft.merchant || "")}" placeholder="예: 마트, 병원"></label>
@@ -2173,7 +2173,7 @@ function renderBudgetModal() {
 }
 
 function renderReceiptLoadingModal() {
-  return modalShell("영수증을 읽는 중", "보통 몇 초 안에 초안이 만들어져요.", `<div class="receipt-loading"><span class="receipt-spinner"></span><strong>가맹점과 금액을 확인하고 있어요</strong><p>사진은 분석이 끝나면 바로 메모리에서 지워집니다.</p></div>`);
+  return modalShell("영수증을 읽는 중", "첫 분석은 글자 사전을 준비하느라 조금 더 걸릴 수 있어요.", `<div class="receipt-loading"><span class="receipt-spinner"></span><strong>무료 글자 인식으로 금액을 확인하고 있어요</strong><p>사진은 처리가 끝나면 서버 메모리에서 바로 지워집니다.</p></div>`);
 }
 
 function renderTaskModal() {
@@ -2762,12 +2762,6 @@ async function analyzeReceiptFile(file) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (result.error === "ai_not_configured") {
-        financeInfo.aiEnabled = false;
-        openExpenseModal();
-        toast("AI 영수증 분석 키가 아직 연결되지 않아 직접 입력을 열었어요.");
-        return;
-      }
       throw new Error(result.error || "analysis_failed");
     }
     financeInfo.aiEnabled = true;

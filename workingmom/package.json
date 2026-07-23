@@ -8,6 +8,7 @@
     "check": "node --check app.js && node --check server.js && node --check sw.js"
   },
   "dependencies": {
+    "tesseract.js": "^7.0.0",
     "web-push": "^3.6.7"
   },
   "engines": {
